@@ -1,4 +1,6 @@
-[streamlit]
-server.port = 8501
-server.headless = true
-browser.gatherUsageStats = false
+[server]
+port = 8501
+headless = true
+
+[browser]
+gatherUsageStats = false
