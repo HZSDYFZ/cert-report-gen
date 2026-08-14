@@ -1,1 +1,1 @@
-streamlit\npython-docx
+streamlit

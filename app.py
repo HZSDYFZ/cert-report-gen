@@ -10,8 +10,6 @@ st.set_page_config(page_title="认证报告生成器", page_icon="📋", layout=
 st.title("📋 认证报告生成器")
 st.markdown("上传 FORM6101 文件和报告模板，自动生成认证报告")
 
-# 模板路径（可从参数传入，默认为固定路径）
-TEMPLATE_PATH = r"C:\Users\31953\Documents\xwechat_files\wxid_7dgk6oeohe3b22_50a0\msg\file\2026-08\AENORC-2022-RC05 报告评审和认证决定检查表02.docx"
 
 INITIAL_TYPES = {"初审二阶段","LOC初审二阶段","初审二阶段(LOC升级)","初审二阶段(QMS）",
                  "初审二阶段（LOC）","初审二阶段（loc升级）","初审二阶段（严重）",
