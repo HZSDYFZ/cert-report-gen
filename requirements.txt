@@ -1,2 +1,1 @@
-streamlit==1.61.1
-python-docx==1.2.0
+streamlit\npython-docx
