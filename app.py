@@ -141,7 +141,7 @@ with tab1:
                         elif i==14 and len(ct)>1: data['auditType']=ct[1]
                         elif i==17 and len(ct)>1: data['leader']=ct[1]
                 for ln in lines:
-                    if '公司名称' in ln and not data.get('company'): data['company']=re.sub(r'.*[:：]','',ln).strip()
+                    if ('公司名称' in ln or '组织名称' in ln) and not data.get('company'): data['company']=re.sub(r'.*[:：]','',ln).strip()
                     if ('任务编号' in ln or '任务号' in ln) and not data.get('taskNo'): data['taskNo']=re.sub(r'.*[:：]','',ln).strip()
                     if '审核组长' in ln and not data.get('leader'): data['leader']=re.sub(r'.*[:：]','',ln).strip()
                     if '审核地址' in ln and not data.get('address'): data['address']=re.sub(r'.*[:：]','',ln).strip()
