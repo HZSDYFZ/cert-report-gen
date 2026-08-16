@@ -22,6 +22,57 @@ TRANSFER_TYPES = {'转移','转移审核','转移（严重）'}
 def sanitize(name):
     return re.sub(r'[\\/:*?<>|]', '_', str(name))
 
+def extract_form_data(form_bytes):
+    with zipfile.ZipFile(io.BytesIO(form_bytes)) as z:
+        xml = z.read('word/document.xml').decode('utf-8')
+    texts = re.findall(r'<w:t[^>]*>([^<]*)</w:t>', xml)
+    data = {}
+    for i, t in enumerate(texts):
+        t_s = t.strip()
+        if not data.get('company'):
+            if t_s in ('组织名称', '公司名称'):
+                if i+1 < len(texts):
+                    nxt = texts[i+1].strip()
+                    if nxt and nxt not in ('', ' ', '  '):
+                        data['company'] = nxt
+            elif t_s.startswith('组织名称') or t_s.startswith('公司名称'):
+                label = '组织名称' if '组织' in t_s else '公司'
+                data['company'] = re.sub(r'^.*[:：]','',t_s[len(label):]).strip()
+        if not data.get('taskNo'):
+            if t_s in ('任务编号', '任务号'):
+                if i+1 < len(texts):
+                    nxt = texts[i+1].strip()
+                    if nxt and not any(k in nxt for k in ['合同','备注','认证','审核']):
+                        data['taskNo'] = nxt
+            elif t_s.startswith('任务编号') or t_s.startswith('任务号'):
+                data['taskNo'] = re.sub(r'^.*[:：]','',t_s[len('任务编号') if '任务编号' in t_s else len('任务号'):]).strip()
+        if ('审核组长' in t_s or t_s == '组长') and not data.get('leader'):
+            if i+1 < len(texts):
+                nxt = texts[i+1].strip()
+                if nxt and len(nxt) < 20:
+                    data['leader'] = nxt
+        if '审核地址' in t_s and not data.get('address'):
+            if i+1 < len(texts):
+                nxt = texts[i+1].strip()
+                if nxt:
+                    data['address'] = nxt
+        if '认证范围' in t_s and not data.get('scope'):
+            if i+1 < len(texts):
+                nxt = texts[i+1].strip()
+                if nxt.startswith('IATF:'):
+                    data['scope'] = nxt
+                elif nxt:
+                    data['scope'] = nxt
+        if '审核性质' in t_s and not data.get('auditType'):
+            if i+1 < len(texts):
+                nxt = texts[i+1].strip()
+                if nxt:
+                    data['auditType'] = nxt
+        if re.search(r'\d{4}年\d{1,2}月\d{1,2}日', t_s) and not data.get('date'):
+            m = re.search(r'(\d{4})[年\-](\d{1,2})[月\-](\d{1,2})', t_s)
+            if m: data['date'] = m.group(1)+'-'+m.group(2).zfill(2)+'-'+m.group(3).zfill(2)
+    return data
+
 def fill_template(template_bytes, data):
     company = data.get('company', '')
     task_no = data.get('taskNo', '')
@@ -41,30 +92,40 @@ def fill_template(template_bytes, data):
     if len(trs) < 24:
         raise Exception('Expected 24 rows, got ' + str(len(trs)))
     c0, c1 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[0])[:2]
-    for attrs, text in re.findall(r'<w:t([^>]*?)>([^<]*)</w:t>', c0):
+    new_c0 = c0
+    for m in re.finditer(r'<w:t([^>]*?)>([^<]*)</w:t>', c0):
+        text = m.group(2)
         if text.strip() in (':', ''):
+            attrs = m.group(1)
+            old = ('<w:t'+attrs+'>'+text+'</w:t>') if attrs else ('<w:t>'+text+'</w:t>')
             new = ('<w:t'+attrs+'>'+text+company+'</w:t>') if attrs else ('<w:t>'+text+company+'</w:t>')
-            c0 = c0.replace(('<w:t'+attrs+'>'+text+'</w:t>') if attrs else ('<w:t>'+text+'</w:t>'), new, 1)
+            new_c0 = new_c0.replace(old, new, 1)
             break
-    for attrs, text in re.findall(r'<w:t([^>]*?)>([^<]*)</w:t>', c1):
+    new_c1 = c1
+    for m in re.finditer(r'<w:t([^>]*?)>([^<]*)</w:t>', c1):
+        text = m.group(2)
         if text == '任务号：':
+            attrs = m.group(1)
+            old = ('<w:t'+attrs+'>'+text+'</w:t>') if attrs else ('<w:t>'+text+'</w:t>')
             new = ('<w:t'+attrs+'>'+text+task_no+'</w:t>') if attrs else ('<w:t>'+text+task_no+'</w:t>')
-            c1 = c1.replace(('<w:t'+attrs+'>'+text+'</w:t>') if attrs else ('<w:t>'+text+'</w:t>'), new, 1)
+            new_c1 = new_c1.replace(old, new, 1)
             break
-    trs[0] = trs[0].replace(c0, c0, 1).replace(c1, c1, 1)
+    trs[0] = trs[0].replace(c0, new_c0, 1).replace(c1, new_c1, 1)
     cells1 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[1])
     if len(cells1) >= 2:
         c = cells1[1]
         if not re.findall(r'<w:t[^>]*>([^<]+)</w:t>', c):
-            c = c.replace('</w:tc>', '<w:p><w:r><w:rPr><w:rFonts w:ascii="宋体" w:hAnsi="宋体" w:eastAsia="宋体"/><w:sz w:val="20"/></w:rPr><w:t>'+str(leader)+'</w:t></w:r></w:p></w:tc>', 1)
+            font_name = chr(23454) + chr(20307)
+            font_html = '<w:p><w:r><w:rPr><w:rFonts w:ascii="'+font_name+'" w:hAnsi="'+font_name+'" w:eastAsia="'+font_name+'"/><w:sz w:val="20"/></w:rPr><w:t>'+str(leader)+'</w:t></w:r></w:p></w:tc>'
+            c = c.replace('</w:tc>', font_html, 1)
         trs[1] = trs[1].replace(cells1[1], c, 1)
     cells3 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[3])
     if len(cells3) >= 2:
         def rcb(m):
             t, a = m.group(2), m.group(1)
-            if audit_type in INITIAL_TYPES: t = t.replace('□初审', '☑初审', 1)
-            elif audit_type in SURVEILLANCE_TYPES: t = t.replace('□初审      □', '☐初审      ☑', 1)
-            elif audit_type in RECERT_TYPES or audit_type in TRANSFER_TYPES: t = t.replace('□再认证/转移', '☑再认证/转移', 1)
+            if audit_type in INITIAL_TYPES: t = t.replace('\u25A1\u521d\u5ba1', '\u2611\u521d\u5ba1', 1)
+            elif audit_type in SURVEILLANCE_TYPES: t = t.replace('\u25A1\u521d\u5ba1      \u25A1', '\u2610\u521d\u5ba1      \u2611', 1)
+            elif audit_type in RECERT_TYPES or audit_type in TRANSFER_TYPES: t = t.replace('\u25A1\u518d\u8ba4\u8bc1/\u8f6c\u79fb', '\u2611\u518d\u8ba4\u8bc1/\u8f6c\u79fb', 1)
             return ('<w:t'+a+'>'+t+'</w:t>') if a else ('<w:t>'+t+'</w:t>')
         cx = re.sub(r'<w:t([^>]*?)>([^<]*)</w:t>', rcb, cells3[1])
         trs[3] = trs[3].replace(cells3[1], cx, 1)
@@ -80,77 +141,45 @@ def fill_template(template_bytes, data):
         paras = re.findall(r'<w:p[^>]*>.*?</w:p>', cx, re.DOTALL)
         sc = -1
         if audit_type in INITIAL_TYPES or audit_type in RECERT_TYPES: sc = 0
+        elif audit_type in SURVEILLANCE_TYPES: sc = 1
         elif audit_type in TRANSFER_TYPES: sc = 2
-        elif audit_type in SURVEILLANCE_TYPES: sc = 4
-        np = list(paras)
-        for pi, p in enumerate(paras):
-            if pi <= 6:
-                np[pi] = p.replace('<w:checked w:val="0"/>', '<w:checked w:val="1"/>', 1) if pi == sc else p.replace('<w:checked w:val="1"/>', '<w:checked w:val="0"/>', 1)
-        pp, rem, off = [], cx, 0
-        for p in paras:
-            idx = rem.find(p)
-            if idx < 0: break
-            pp.append(off + idx); off = off + idx + len(p); rem = rem[idx + len(p):]
-        if len(np) > 9 and '日期：' in np[9]: np[9] = np[9].replace('日期：', '日期：'+str(date), 1)
-        parts = []
-        pe = 0
-        for i, pos in enumerate(pp):
-            parts.append(cx[pe:pos]); parts.append(np[i] if i < len(np) else paras[i]); pe = pos + len(paras[i])
-        parts.append(cx[pe:])
-        trs[21] = trs[21].replace(cells21[1], ''.join(parts), 1)
-    new_tbl = row_parts[0]
-    for tr in trs: new_tbl += tr
-    last = max(i for i, p in enumerate(row_parts) if p.startswith('<w:tr'))
-    new_tbl += ''.join(row_parts[last+1:])
-    new_xml = xml_str[:tbl_start] + new_tbl + xml_str[tbl_end:]
-    contents['word/document.xml'] = new_xml.encode('utf-8')
-    out = io.BytesIO()
-    with zipfile.ZipFile(out, 'w', compression=zipfile.ZIP_DEFLATED) as zo:
-        for n, d in contents.items(): zo.writestr(n, d)
-    return out.getvalue()
+        if sc >= 0 and sc < len(paras):
+            p = paras[sc]
+            if re.search(r'<w:t[^>]*> (.*?) </w:t>', p):
+                p = re.sub(r'<w:t[^>]*> (.*?) </w:t>', lambda m: '<w:t>'+m.group(1)+'</w:t>', p, 1)
+            elif re.search(r'<w:t[^>]*>([^<]*)</w:t>', p):
+                p = re.sub(r'<w:t([^>]*?)>([^<]*)</w:t>', lambda m: '<w:t'+m.group(1)+'>'+str(sc+1)+'</w:t>' if not m.group(2).strip() else ('<w:t'+m.group(1)+'>'+m.group(2)+'</w:t>'), p, 1)
+            cx = cx.replace(p, p, 1)
+        trs[21] = trs[21].replace(cells21[1], cx, 1)
+    cells22 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[22])
+    if len(cells22) >= 2:
+        cx = cells22[1]
+        if date:
+            cx = cx.replace('        ', date, 1)
+        trs[22] = trs[22].replace(cells22[1], cx, 1)
+    out_xml = xml_str[:tbl_start] + ''.join(trs) + xml_str[tbl_end:]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zout:
+        for name, content in contents.items():
+            if name == 'word/document.xml':
+                zout.writestr(name, out_xml.encode('utf-8'))
+            else:
+                zout.writestr(name, content)
+    return buf.getvalue()
 
-tab1, tab2 = st.tabs(['Single Mode', 'Batch Mode'])
-
-with tab1:
-    st.header('Single Generation')
-    col1, col2 = st.columns(2)
-    with col1:
-        form_file = st.file_uploader('FORM6101 (.docx)', type=['docx'], key='s1')
-    with col2:
-        tpl_file = st.file_uploader('Report Template (.docx)', type=['docx'], key='s2')
-    if form_file and tpl_file:
-        with st.spinner('Parsing...'):
+with st.tabs(['Single Report', 'Batch Generation']):
+    with st.tab("Single Report"):
+        st.header('Single Report Generation')
+        col1, col2 = st.columns(2)
+        with col1:
+            form_file = st.file_uploader('FORM6101 (.docx)', type=['docx'], key='s1')
+        with col2:
+            tpl_file = st.file_uploader('Report Template (.docx)', type=['docx'], key='s2')
+        data = None
+        if form_file and tpl_file:
             try:
-                with zipfile.ZipFile(io.BytesIO(form_file.getvalue())) as zfin:
-                    xml = zfin.read('word/document.xml').decode('utf-8')
-                texts = re.findall(r'<w:t[^>]*>([^<]*)</w:t>', xml)
-                lines = [t.strip() for t in texts if t.strip()]
-                data = {}
-                tm = re.search(r'<w:tbl>(.*?)</w:tbl>', xml, re.DOTALL)
-                if tm:
-                    for i, row in enumerate(re.findall(r'<w:tr[^>]*>(.*?)</w:tr>', tm.group(1), re.DOTALL)):
-                        ct = [' '.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', c)) for c in re.findall(r'<w:tc[^>]*>(.*?)</w:tc>', row, re.DOTALL)]
-                        if i==1 and len(ct)>1: data['taskNo']=ct[1]
-                        elif i==2 and len(ct)>1: data['company']=ct[1]
-                        elif i==3 and len(ct)>1: data['address']=ct[1]
-                        elif i==11 and len(ct)>1:
-                            s=ct[1]; data['scope']=s[5:] if s.startswith('IATF:') else s
-                        elif i==13 and len(ct)>2:
-                            m=re.search(r'(\d{4})[年\-](\d{1,2})[月\-](\d{1,2})',ct[2])
-                            if m: data['date']=m.group(1)+'-'+m.group(2).zfill(2)+'-'+m.group(3).zfill(2)
-                        elif i==14 and len(ct)>1: data['auditType']=ct[1]
-                        elif i==17 and len(ct)>1: data['leader']=ct[1]
-                for ln in lines:
-                    if ('公司名称' in ln or '组织名称' in ln) and not data.get('company'): data['company']=re.sub(r'.*[:：]','',ln).strip()
-                    if ('任务编号' in ln or '任务号' in ln) and not data.get('taskNo'): data['taskNo']=re.sub(r'.*[:：]','',ln).strip()
-                    if '审核组长' in ln and not data.get('leader'): data['leader']=re.sub(r'.*[:：]','',ln).strip()
-                    if '审核地址' in ln and not data.get('address'): data['address']=re.sub(r'.*[:：]','',ln).strip()
-                    if ('认证范围' in ln or 'IATF:' in ln) and not data.get('scope'):
-                        s=re.sub(r'.*[:：]','',ln).strip(); data['scope']=s[5:] if s.startswith('IATF:') else s
-                    if ('审核日期' in ln or re.search(r'\d{4}年\d{1,2}月\d{1,2}日',ln)) and not data.get('date'):
-                        m=re.search(r'(\d{4})[年\-](\d{1,2})[月\-](\d{1,2})',ln)
-                        if m: data['date']=m.group(1)+'-'+m.group(2).zfill(2)+'-'+m.group(3).zfill(2)
-                    if ('审核性质' in ln or '审核类型' in ln) and not data.get('auditType'): data['auditType']=re.sub(r'.*[:：]','',ln).strip()
+                form_bytes = form_file.getvalue()
+                data = extract_form_data(form_bytes)
             except Exception as e:
                 st.error('Parse failed: '+str(e)); data=None
         if data:
@@ -165,9 +194,9 @@ with tab1:
                         mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
                     st.success('Generated!')
                 except Exception as e: st.error('Failed: '+str(e))
-    elif form_file or tpl_file: st.info('Please upload both files')
+        elif form_file or tpl_file: st.info('Please upload both files')
 
-with tab2:
+with st.tab("Batch Generation"):
     st.header('Batch Generation')
     col1, col2 = st.columns(2)
     with col1:
