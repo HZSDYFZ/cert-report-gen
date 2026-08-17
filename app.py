@@ -1,4 +1,4 @@
-﻿import streamlit as st
+import streamlit as st
 import zipfile, re, io, os
 from datetime import datetime
 
@@ -126,18 +126,24 @@ def fill_template(template_bytes, data):
     if len(cells3) >= 2:
         all_matches = re.findall(r'<w:t([^>]*?)>([^<]*)</w:t>', cells3[1])
         full_text = ''.join(t for _, t in all_matches)
+        # Detect pre-filled state: if any node already has ☑, skip modifying that node
         def rcb(m):
             t, a = m.group(2), m.group(1)
-            # Skip if this node is just "其它" (should not be modified)
-            if '其它' in t and '\u25a1' not in t:
+            # Skip if this node already has a checked box
+            if '\u2611' in t:
                 return ('<w:t'+a+'>'+t+'</w:t>') if a else ('<w:t>'+t+'</w:t>')
             if audit_type in INITIAL_TYPES:
-                if '\u25a1' in t: t = t.replace('\u25a1', '\u2611', 1)
+                if '\u25a1' in t and '初审' in t: t = t.replace('\u25a1', '\u2611', 1)
             elif audit_type in SURVEILLANCE_TYPES:
-                if '\u25a1' in t and '初审' in full_text: t = t.replace('\u25a1', '\u2610', 1)
-                elif '\u25a1' in t and '监' in full_text: t = t.replace('\u25a1', '\u2611', 1)
+                if '\u25a1' in t and '初审' in t:
+                    t = t.replace('\u25a1', '\u2610', 1)
+                    # Original template: both □ in one node (□初审      □), check second for 监
+                    t = t.replace('\u25a1', '\u2611', 1)
+                elif '\u25a1' in t and '监' in t:
+                    # ZNL template: separate node with just □监
+                    t = t.replace('\u25a1', '\u2611', 1)
             elif audit_type in RECERT_TYPES or audit_type in TRANSFER_TYPES:
-                if '\u25a1' in t and ('再认证' in full_text or '转移' in full_text): t = t.replace('\u25a1', '\u2611', 1)
+                if '\u25a1' in t and ('再认证' in t or '转移' in t): t = t.replace('\u25a1', '\u2611', 1)
             return ('<w:t'+a+'>'+t+'</w:t>') if a else ('<w:t>'+t+'</w:t>')
         cx = re.sub(r'<w:t([^>]*?)>([^<]*)</w:t>', rcb, cells3[1])
         trs[3] = trs[3].replace(cells3[1], cx, 1)
