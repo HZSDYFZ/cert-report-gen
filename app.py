@@ -5,7 +5,7 @@ from datetime import datetime
 st.set_page_config(page_title='Cert Report', page_icon='K', layout='wide')
 st.title('Cert Report Generator')
 
-INITIAL_TYPES = {'初审二阶段','LOC初审二阶段','初审二阶段(LOC升级)','初审二阶段(QMS）',
+INITIAL_TYPES = {'一阶段','二阶段','初审二阶段','LOC初审二阶段','初审二阶段(LOC升级)','初审二阶段(QMS）',
                  '初审二阶段（LOC）','初审二阶段（loc升级）','初审二阶段（严重）',
                  '初审二阶段（主场所）','初审二阶段（免一阶段）','初审二阶段（搬迁）',
                  '初审二阶段（本机构搬迁）','特殊审核（二阶段审核后扩范围）',
@@ -124,11 +124,20 @@ def fill_template(template_bytes, data):
         trs[1] = trs[1].replace(cells1[1], c, 1)
     cells3 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[3])
     if len(cells3) >= 2:
+        all_matches = re.findall(r'<w:t([^>]*?)>([^<]*)</w:t>', cells3[1])
+        full_text = ''.join(t for _, t in all_matches)
         def rcb(m):
             t, a = m.group(2), m.group(1)
-            if audit_type in INITIAL_TYPES: t = t.replace('\u25A1\u521d\u5ba1', '\u2611\u521d\u5ba1', 1)
-            elif audit_type in SURVEILLANCE_TYPES: t = t.replace('\u25A1\u521d\u5ba1      \u25A1', '\u2610\u521d\u5ba1      \u2611', 1)
-            elif audit_type in RECERT_TYPES or audit_type in TRANSFER_TYPES: t = t.replace('\u25A1\u518d\u8ba4\u8bc1/\u8f6c\u79fb', '\u2611\u518d\u8ba4\u8bc1/\u8f6c\u79fb', 1)
+            # Skip if this node is just "其它" (should not be modified)
+            if '其它' in t and '\u25a1' not in t:
+                return ('<w:t'+a+'>'+t+'</w:t>') if a else ('<w:t>'+t+'</w:t>')
+            if audit_type in INITIAL_TYPES:
+                if '\u25a1' in t: t = t.replace('\u25a1', '\u2611', 1)
+            elif audit_type in SURVEILLANCE_TYPES:
+                if '\u25a1' in t and '初审' in full_text: t = t.replace('\u25a1', '\u2610', 1)
+                elif '\u25a1' in t and '监' in full_text: t = t.replace('\u25a1', '\u2611', 1)
+            elif audit_type in RECERT_TYPES or audit_type in TRANSFER_TYPES:
+                if '\u25a1' in t and ('再认证' in full_text or '转移' in full_text): t = t.replace('\u25a1', '\u2611', 1)
             return ('<w:t'+a+'>'+t+'</w:t>') if a else ('<w:t>'+t+'</w:t>')
         cx = re.sub(r'<w:t([^>]*?)>([^<]*)</w:t>', rcb, cells3[1])
         trs[3] = trs[3].replace(cells3[1], cx, 1)
@@ -147,7 +156,7 @@ def fill_template(template_bytes, data):
         # Determine which checkbox to check based on audit type keywords
         at = audit_type
         target_text = None
-        if '二阶段' in at or '再认证' in at:
+        if ('二阶段' in at or '一阶段' in at or '再认证' in at):
             target_text = '可发证'
         elif '转移' in at:
             target_text = '可换发证书'
