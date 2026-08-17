@@ -85,7 +85,9 @@ def fill_template(template_bytes, data):
         contents = {n: zfin.read(n) for n in zfin.namelist()}
     xml_str = contents['word/document.xml'].decode('utf-8')
     tbl_start = xml_str.find('<w:tbl>')
-    tbl_end = xml_str.find('</w:tbl>', tbl_start) + 8
+    # Find matching </w:tbl> for the first table using negative lookahead
+    tbl_match = re.search(r'<w:tbl[^>]*>(?:(?!</w:tbl>).)*</w:tbl>', xml_str[tbl_start:], re.DOTALL)
+    tbl_end = tbl_start + tbl_match.end() if tbl_match else len(xml_str)
     tbl_xml = xml_str[tbl_start:tbl_end]
     row_parts = re.split(r'(<w:tr[^>]*>.*?</w:tr>)', tbl_xml, flags=re.DOTALL)
     trs = [p for p in row_parts if p.startswith('<w:tr')]
