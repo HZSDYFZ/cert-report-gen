@@ -123,11 +123,14 @@ def fill_template(template_bytes, data):
         all_matches = re.findall(r'<w:t([^>]*?)>([^<]*)</w:t>', cells3[1])
         full_text = ''.join(t for _, t in all_matches)
         # Detect pre-filled state: if any node already has ☑, skip modifying that node
+        # Track match index for neighbor lookups
+        match_idx = [0]
         def rcb(m):
             t, a = m.group(2), m.group(1)
-            # Skip if this node already has a checked box
-            if '\u2611' in t:
-                return ('<w:t'+a+'>'+t+'</w:t>') if a else ('<w:t>'+t+'</w:t>')
+            pos = match_idx[0]
+            match_idx[0] += 1
+            # Always reset ☑ back to □ first, then apply correct value
+            t = t.replace('\u2611', '\u25a1')
             if is_transfer(audit_type):
                 if '\u25a1' in t and ('再认证' in t or '转移' in t):
                     t = t.replace('\u25a1', '\u2611', 1)
@@ -138,7 +141,6 @@ def fill_template(template_bytes, data):
                     if '\u25a1' in t:
                         t = t.replace('\u25a1', '\u2610', 1)
                 elif '\u25a1' in t and '再认证' in t and '再认证' in audit_type:
-                    # Only check 再认证 node for 再认证 type, not for 二阶段/一阶段
                     t = t.replace('\u25a1', '\u2611', 1)
             elif is_surveillance(audit_type):
                 if '\u25a1' in t and '初审' in t:
@@ -148,6 +150,12 @@ def fill_template(template_bytes, data):
                         t = t.replace('\u25a1', '\u2611', 1)
                 elif '\u25a1' in t and '监' in t:
                     t = t.replace('\u25a1', '\u2611', 1)
+                elif '\u25a1' in t:
+                    # ZNL template: □ and 监 in separate nodes, check neighbors
+                    prev_has_jian = pos > 0 and '监' in all_matches[pos-1][1]
+                    next_has_jian = pos + 1 < len(all_matches) and '监' in all_matches[pos+1][1]
+                    if prev_has_jian or next_has_jian:
+                        t = t.replace('\u25a1', '\u2611', 1)
             return ('<w:t'+a+'>'+t+'</w:t>') if a else ('<w:t>'+t+'</w:t>')
         cx = re.sub(r'<w:t([^>]*?)>([^<]*)</w:t>', rcb, cells3[1])
         trs[3] = trs[3].replace(cells3[1], cx, 1)
