@@ -133,12 +133,17 @@ def fill_template(template_bytes, data):
             if '\u2611' in t:
                 return ('<w:t'+a+'>'+t+'</w:t>') if a else ('<w:t>'+t+'</w:t>')
             if audit_type in INITIAL_TYPES:
-                if '\u25a1' in t and '初审' in t: t = t.replace('\u25a1', '\u2611', 1)
+                if '\u25a1' in t and '初审' in t:
+                    t = t.replace('\u25a1', '\u2611', 1)
+                    # Original template: second □ is for 监, don't check it for initial audit
+                    if '\u25a1' in t:
+                        t = t.replace('\u25a1', '\u2610', 1)
             elif audit_type in SURVEILLANCE_TYPES:
                 if '\u25a1' in t and '初审' in t:
                     t = t.replace('\u25a1', '\u2610', 1)
                     # Original template: both □ in one node (□初审      □), check second for 监
-                    t = t.replace('\u25a1', '\u2611', 1)
+                    if '\u25a1' in t:
+                        t = t.replace('\u25a1', '\u2611', 1)
                 elif '\u25a1' in t and '监' in t:
                     # ZNL template: separate node with just □监
                     t = t.replace('\u25a1', '\u2611', 1)
