@@ -5,19 +5,15 @@ from datetime import datetime
 st.set_page_config(page_title='Cert Report', page_icon='K', layout='wide')
 st.title('Cert Report Generator')
 
-INITIAL_TYPES = {'一阶段','二阶段','初审二阶段','LOC初审二阶段','初审二阶段(LOC升级)','初审二阶段(QMS）',
-                 '初审二阶段（LOC）','初审二阶段（loc升级）','初审二阶段（严重）',
-                 '初审二阶段（主场所）','初审二阶段（免一阶段）','初审二阶段（搬迁）',
-                 '初审二阶段（本机构搬迁）','特殊审核（二阶段审核后扩范围）',
-                 '特殊审核(变更)','特殊审核（变更）','特殊审核（扩范围）'}
-SURVEILLANCE_TYPES = {'监一','监一（ISO9001）','监一（严重）','监一（主场所）',
-                      '监二','监二（IATF)','监二（ISO）','监二（ISO9001:2015）',
-                      '监二（Q）','监二（严重）','监一(严重)','监一（IATF）',
-                      '监一（ISO）','监一（Q）','监二(IATF)','监二(ISO 9001)',
-                      '监二(ISO9001)','监二（IATF16949）','监二（IATF）','监二（QMS）',
-                      '监二（主场所）','监二（主场所，严重）'}
-RECERT_TYPES = {'再认证','再认证（严重）','再认证（主场所）'}
-TRANSFER_TYPES = {'转移','转移审核','转移（严重）'}
+# Determine audit type category by keyword matching
+def is_initial(audit_type):
+    return '一阶段' in audit_type or '二阶段' in audit_type or '再认证' in audit_type
+
+def is_surveillance(audit_type):
+    return '监' in audit_type
+
+def is_transfer(audit_type):
+    return '转移' in audit_type
 
 def sanitize(name):
     return re.sub(r'[\\/:*?<>|]', '_', str(name))
@@ -132,23 +128,26 @@ def fill_template(template_bytes, data):
             # Skip if this node already has a checked box
             if '\u2611' in t:
                 return ('<w:t'+a+'>'+t+'</w:t>') if a else ('<w:t>'+t+'</w:t>')
-            if audit_type in INITIAL_TYPES:
+            if is_transfer(audit_type):
+                if '\u25a1' in t and ('再认证' in t or '转移' in t):
+                    t = t.replace('\u25a1', '\u2611', 1)
+            elif is_initial(audit_type):
                 if '\u25a1' in t and '初审' in t:
                     t = t.replace('\u25a1', '\u2611', 1)
-                    # Original template: second □ is for 监, don't check it for initial audit
+                    # Original template: second □ is for 监, uncheck it
                     if '\u25a1' in t:
                         t = t.replace('\u25a1', '\u2610', 1)
-            elif audit_type in SURVEILLANCE_TYPES:
+                elif '\u25a1' in t and '再认证' in t and '再认证' in audit_type:
+                    # Only check 再认证 node for 再认证 type, not for 二阶段/一阶段
+                    t = t.replace('\u25a1', '\u2611', 1)
+            elif is_surveillance(audit_type):
                 if '\u25a1' in t and '初审' in t:
                     t = t.replace('\u25a1', '\u2610', 1)
-                    # Original template: both □ in one node (□初审      □), check second for 监
+                    # Original template: both □ in one node, check second for 监
                     if '\u25a1' in t:
                         t = t.replace('\u25a1', '\u2611', 1)
                 elif '\u25a1' in t and '监' in t:
-                    # ZNL template: separate node with just □监
                     t = t.replace('\u25a1', '\u2611', 1)
-            elif audit_type in RECERT_TYPES or audit_type in TRANSFER_TYPES:
-                if '\u25a1' in t and ('再认证' in t or '转移' in t): t = t.replace('\u25a1', '\u2611', 1)
             return ('<w:t'+a+'>'+t+'</w:t>') if a else ('<w:t>'+t+'</w:t>')
         cx = re.sub(r'<w:t([^>]*?)>([^<]*)</w:t>', rcb, cells3[1])
         trs[3] = trs[3].replace(cells3[1], cx, 1)
@@ -171,7 +170,7 @@ def fill_template(template_bytes, data):
             target_text = '可发证'
         elif '转移' in at:
             target_text = '可换发证书'
-        elif '监一' in at or '监二' in at:
+        elif '监' in at:
             target_text = '不换证'
         if target_text:
             for idx, cp in cb_paras:
