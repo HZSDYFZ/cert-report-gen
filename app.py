@@ -166,37 +166,35 @@ def fill_template(template_bytes, data):
             else:
                 zout.writestr(name, content)
     return buf.getvalue()
-
-with st.tabs(['Single Report', 'Batch Generation']):
-    with st.tab("Single Report"):
-        st.header('Single Report Generation')
-        col1, col2 = st.columns(2)
-        with col1:
-            form_file = st.file_uploader('FORM6101 (.docx)', type=['docx'], key='s1')
-        with col2:
-            tpl_file = st.file_uploader('Report Template (.docx)', type=['docx'], key='s2')
-        data = None
-        if form_file and tpl_file:
+mode = st.radio('选择模式', ['Single Report', 'Batch Generation'], horizontal=True)
+if mode == 'Single Report':
+    st.header('Single Report Generation')
+    col1, col2 = st.columns(2)
+    with col1:
+        form_file = st.file_uploader('FORM6101 (.docx)', type=['docx'], key='s1')
+    with col2:
+        tpl_file = st.file_uploader('Report Template (.docx)', type=['docx'], key='s2')
+    data = None
+    if form_file and tpl_file:
+        try:
+            form_bytes = form_file.getvalue()
+            data = extract_form_data(form_bytes)
+        except Exception as e:
+            st.error('Parse failed: '+str(e)); data=None
+    if data:
+        st.markdown('### Extracted Fields')
+        for k,v in data.items(): st.text('**'+k+'**: '+str(v or '(not found)'))
+        if st.button('Generate Report', type='primary'):
             try:
-                form_bytes = form_file.getvalue()
-                data = extract_form_data(form_bytes)
-            except Exception as e:
-                st.error('Parse failed: '+str(e)); data=None
-        if data:
-            st.markdown('### Extracted Fields')
-            for k,v in data.items(): st.text('**'+k+'**: '+str(v or '(not found)'))
-            if st.button('Generate Report', type='primary'):
-                try:
-                    r = fill_template(tpl_file.getvalue(), data)
-                    ts = datetime.now().strftime('%Y%m%d_%H%M')
-                    fn = sanitize(data.get('company','Report'))+'_'+ts+'.docx'
-                    st.download_button('Download', data=r, file_name=fn,
-                        mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
-                    st.success('Generated!')
-                except Exception as e: st.error('Failed: '+str(e))
-        elif form_file or tpl_file: st.info('Please upload both files')
-
-with st.tab("Batch Generation"):
+                r = fill_template(tpl_file.getvalue(), data)
+                ts = datetime.now().strftime('%Y%m%d_%H%M')
+                fn = sanitize(data.get('company','Report'))+'_'+ts+'.docx'
+                st.download_button('Download', data=r, file_name=fn,
+                    mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+                st.success('Generated!')
+            except Exception as e: st.error('Failed: '+str(e))
+    elif form_file or tpl_file: st.info('Please upload both files')
+else:
     st.header('Batch Generation')
     col1, col2 = st.columns(2)
     with col1:
