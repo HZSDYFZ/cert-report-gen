@@ -141,18 +141,25 @@ def fill_template(template_bytes, data):
     cells21 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[21])
     if len(cells21) >= 2:
         cx = cells21[1]
-        paras = re.findall(r'<w:p[^>]*>.*?</w:p>', cx, re.DOTALL)
-        sc = -1
-        if audit_type in INITIAL_TYPES or audit_type in RECERT_TYPES: sc = 0
-        elif audit_type in SURVEILLANCE_TYPES: sc = 1
-        elif audit_type in TRANSFER_TYPES: sc = 2
-        if sc >= 0 and sc < len(paras):
-            p = paras[sc]
-            if re.search(r'<w:t[^>]*> (.*?) </w:t>', p):
-                p = re.sub(r'<w:t[^>]*> (.*?) </w:t>', lambda m: '<w:t>'+m.group(1)+'</w:t>', p, 1)
-            elif re.search(r'<w:t[^>]*>([^<]*)</w:t>', p):
-                p = re.sub(r'<w:t([^>]*?)>([^<]*)</w:t>', lambda m: '<w:t'+m.group(1)+'>'+str(sc+1)+'</w:t>' if not m.group(2).strip() else ('<w:t'+m.group(1)+'>'+m.group(2)+'</w:t>'), p, 1)
-            cx = cx.replace(p, p, 1)
+        # Find all checkbox paragraphs and their text
+        para_blocks = re.findall(r'<w:p[^>]*>.*?</w:p>', cx, re.DOTALL)
+        cb_paras = [(i, p) for i, p in enumerate(para_blocks) if '<w:checkBox' in p]
+        # Determine which checkbox to check based on audit type keywords
+        at = audit_type
+        target_text = None
+        if '二阶段' in at or '再认证' in at:
+            target_text = '可发证'
+        elif '转移' in at:
+            target_text = '可换发证书'
+        elif '监一' in at or '监二' in at:
+            target_text = '不换证'
+        if target_text:
+            for idx, cp in cb_paras:
+                texts = re.findall(r'<w:t[^>]*>([^<]*)</w:t>', cp)
+                txt = ''.join(texts)
+                if target_text in txt:
+                    cx = cx.replace(cp, re.sub(r'<w:checked w:val="0"/>', '<w:checked w:val="1"/>', cp), 1)
+                    break
         trs[21] = trs[21].replace(cells21[1], cx, 1)
     cells22 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[22])
     if len(cells22) >= 2:
