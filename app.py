@@ -14,6 +14,12 @@ def format_date(val):
         return ''
     if isinstance(val, datetime):
         return val.strftime('%Y-%m-%d')
+    if isinstance(val, (int, float)):
+        # Excel serial date (days since 1899-12-30)
+        try:
+            return (datetime(1899, 12, 30) + __import__('datetime').timedelta(days=int(val))).strftime('%Y-%m-%d')
+        except Exception:
+            return ''
     s = str(val).strip()
     if not s or s == '#N/A':
         return ''
@@ -323,20 +329,20 @@ else:
             rows_data = []
             for row in ws.iter_rows(min_row=2):
                 vals = [c.value for c in row]
-                if vals[2]:
+                if vals[3]:
                     rows_data.append(vals)
             st.success('Read ' + str(len(rows_data)) + ' rows')
             if st.button('Generate All (ZIP)', type='primary'):
                 results, errors = [], []
                 for ri, rv in enumerate(rows_data):
-                    company = rv[2]
-                    audit_team = rv[3]
-                    audit_type = rv[4]
-                    audit_address = rv[6]
-                    cert_scope = rv[7]
-                    task_no = rv[8]
-                    conclusion = rv[10]
-                    date_val = rv[11]
+                    company = rv[3]
+                    audit_team = rv[4]
+                    audit_type = rv[5]
+                    audit_address = rv[12]
+                    cert_scope = rv[13]
+                    task_no = rv[14]
+                    conclusion = rv[16]
+                    date_val = rv[17]
                     ds = format_date(date_val)
                     leader = str(audit_team).split('+')[0].strip() if audit_team else ''
                     d = {
