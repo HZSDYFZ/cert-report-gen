@@ -204,7 +204,7 @@ def build_docx(other_files, original_doc_xml, trs):
     tbl_start = original_doc_xml.find('<w:tbl>')
     tbl_match = re.search(r'<w:tbl[^>]*>(?:(?!</w:tbl>).)*</w:tbl>', original_doc_xml[tbl_start:], re.DOTALL)
     tbl_end = tbl_start + tbl_match.end()
-    new_tbl = trs[0] + ''.join(trs[1:])
+    new_tbl = '<w:tbl>' + trs[0] + ''.join(trs[1:]) + '</w:tbl>'
     new_doc_xml = original_doc_xml[:tbl_start] + new_tbl + original_doc_xml[tbl_end:]
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zout:
