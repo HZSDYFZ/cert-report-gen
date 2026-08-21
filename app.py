@@ -280,10 +280,7 @@ else:
                 headers = [c.value for c in ws[1]]
                 st.write('Headers: ' + str(headers))
                 # Count actual data rows (rows with company name in col 2)
-                total = 0
-                for row in ws.iter_rows(min_row=2):
-                    if row[2].value:
-                        total += 1
+                total = sum(1 for row in ws.iter_rows(min_row=2, max_row=min(ws.max_row, 5000)) if row[2].value)
                 st.session_state['batch_total'] = total
                 st.session_state['_excel_key'] = excel_file.name
                 st.session_state['batch_index'] = 0
