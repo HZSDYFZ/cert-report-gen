@@ -1,20 +1,11 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
 import zipfile, re, io, os
-import openpyxl
 from datetime import datetime
+import openpyxl
 
 st.set_page_config(page_title='Cert Report Generator', page_icon='📋', layout='wide')
 st.title('认证报告生成器')
-
-if 'batch_progress' not in st.session_state:
-    st.session_state['batch_progress'] = 0
-if 'batch_done' not in st.session_state:
-    st.session_state['batch_done'] = False
-if 'batch_result' not in st.session_state:
-    st.session_state['batch_result'] = None
-if 'batch_error' not in st.session_state:
-    st.session_state['batch_error'] = None
 
 def sanitize(name):
     return re.sub(r'[\\/:*?<>|]', '_', str(name))
@@ -97,10 +88,7 @@ def parse_template(template_bytes):
     row_parts = re.split(r'(<w:tr[^>]*>.*?</w:tr>)', tbl_xml, flags=re.DOTALL)
     trs = [p for p in row_parts if p.startswith('<w:tr')]
     if len(trs) < 22: raise Exception(f'Expected 22+ rows, got {len(trs)}')
-    original_doc_xml = xml_str
-    original_trs = list(trs)
-    other_files = {n: v for n, v in contents.items() if n != 'word/document.xml'}
-    return other_files, original_doc_xml, original_trs
+    return contents, xml_str, list(trs)
 
 def fill_one_row(original_trs, data):
     company = str(data.get('company', '')).strip()
@@ -110,7 +98,6 @@ def fill_one_row(original_trs, data):
     scope = str(data.get('scope', '')).strip()
     conclusion = str(data.get('conclusion', '')).strip()
     trs = list(original_trs)
-    # Row 0: company + task no
     cells0 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[0])
     if len(cells0) >= 2:
         c0, c1 = cells0[0], cells0[1]
@@ -139,7 +126,6 @@ def fill_one_row(original_trs, data):
             else:
                 c1 = c1[:m.end()] + f'<w:t>{task_no}</w:t>' + c1[m.end():]
         trs[0] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: c0+c1, trs[0], count=1, flags=re.DOTALL)
-    # Row 1: leader
     cells1 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[1])
     if len(cells1) >= 2:
         c1 = cells1[1]
@@ -156,7 +142,6 @@ def fill_one_row(original_trs, data):
             else:
                 c1 = c1[:m.end()] + f'<w:t>{leader}</w:t>' + c1[m.end():]
         trs[1] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: cells1[0]+c1, trs[1], count=1, flags=re.DOTALL)
-    # Row 2: IATF/ISO
     cells2 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[2])
     if len(cells2) >= 2:
         is_iatf = 'IATF' in scope
@@ -166,7 +151,6 @@ def fill_one_row(original_trs, data):
         if is_iso: cells2[1] = replace_unicode_checkbox(cells2[1], '□', '☑')
         else: cells2[1] = replace_unicode_checkbox(cells2[1], '☑', '□')
         trs[2] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: cells2[0]+cells2[1], trs[2], count=1, flags=re.DOTALL)
-    # Row 3: audit type
     cells3 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[3])
     if len(cells3) >= 2:
         is_initial = '二阶段' in audit_type or '一阶段' in audit_type
@@ -187,7 +171,6 @@ def fill_one_row(original_trs, data):
         elif is_special:
             cells3[1] = replace_unicode_checkbox(cells3[1], '□', '☑')
         trs[3] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: cells3[0]+cells3[1], trs[3], count=1, flags=re.DOTALL)
-    # Row 21: conclusion
     cells21 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[21])
     if len(cells21) >= 2:
         is_initial = '二阶段' in audit_type or '一阶段' in audit_type or '再认证' in audit_type
@@ -203,7 +186,7 @@ def fill_one_row(original_trs, data):
         trs[21] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: cells21[0]+c21, trs[21], count=1, flags=re.DOTALL)
     return trs
 
-def build_docx(other_files, original_doc_xml, trs):
+def build_docx(all_files, original_doc_xml, trs):
     tbl_start = original_doc_xml.find('<w:tbl>')
     tbl_match = re.search(r'<w:tbl[^>]*>(?:(?!</w:tbl>).)*</w:tbl>', original_doc_xml[tbl_start:], re.DOTALL)
     tbl_end = tbl_start + tbl_match.end()
@@ -212,7 +195,7 @@ def build_docx(other_files, original_doc_xml, trs):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zout:
         zout.writestr('word/document.xml', new_doc_xml.encode('utf-8'))
-        for name, content in other_files.items():
+        for name, content in all_files.items():
             zout.writestr(name, content)
     return buf.getvalue()
 
@@ -311,36 +294,21 @@ else:
                             results.append((fname, rb))
                         except Exception as e:
                             errors.append(str(company) + ': ' + str(e))
-                        st.session_state['batch_progress'] = (ri + 1) / total
-                    st.session_state['batch_done'] = True
-                    st.session_state['batch_result'] = (results, errors)
-            # Show progress bar from session state (outside button handler)
-            if st.session_state['batch_progress'] > 0 and not st.session_state['batch_done']:
-                st.progress(st.session_state['batch_progress'],
-                    text='Generating ' + str(int(st.session_state['batch_progress'] * total)) + '/' + str(total))
-            if st.session_state['batch_done'] and st.session_state['batch_result'] is not None:
-                results, errors = st.session_state['batch_result']
-                if results:
-                    buf = io.BytesIO()
-                    with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zfout:
-                        for fn, fd in results:
-                            zfout.writestr(fn, fd)
-                    buf.seek(0)
-                    st.download_button('Download All (ZIP)', data=buf,
-                        file_name='reports_' + datetime.now().strftime('%Y%m%d_%H%M') + '.zip',
-                        mime='application/zip')
-                    st.success('Generated ' + str(len(results)) + ' reports')
-                if errors:
-                    st.warning(str(len(errors)) + ' failed')
-                    for e in errors[:5]:
-                        st.text('  - ' + e)
-                # Reset for next run
-                st.session_state['batch_progress'] = 0
-                st.session_state['batch_done'] = False
-                st.session_state['batch_result'] = None
-
+                    if results:
+                        buf = io.BytesIO()
+                        with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zfout:
+                            for fn, fd in results:
+                                zfout.writestr(fn, fd)
+                        buf.seek(0)
+                        st.download_button('Download All (ZIP)', data=buf,
+                            file_name='reports_' + datetime.now().strftime('%Y%m%d_%H%M') + '.zip',
+                            mime='application/zip')
+                        st.success('Generated ' + str(len(results)) + ' reports')
+                    if errors:
+                        st.warning(str(len(errors)) + ' failed')
+                        for e in errors[:5]:
+                            st.text('  - ' + e)
         except Exception as e:
             st.error('Error: ' + str(e))
     elif excel_file or tpl_file2:
         st.info('Please upload both files')
-
