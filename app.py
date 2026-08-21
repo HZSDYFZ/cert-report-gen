@@ -249,7 +249,7 @@ else:
     with col2:
         tpl_file2 = st.file_uploader('Report Template (.docx)', type=['docx'], key='b2')
 
-    BATCH_SIZE = 3
+    BATCH_SIZE = 20
 
     if 'batch_index' not in st.session_state:
         st.session_state['batch_index'] = 0
@@ -278,7 +278,7 @@ else:
                 headers = [c.value for c in ws[1]]
                 st.write('Headers: ' + str(headers))
                 st.session_state['_excel_bytes'] = excel_file.getvalue()
-                st.session_state['batch_total'] = ws.max_row - 1
+                st.session_state['batch_total'] = sum(1 for r in ws.iter_rows(min_row=2) if r[2].value)
                 st.session_state['_excel_key'] = excel_file.name
                 st.session_state['batch_index'] = 0
                 st.session_state['batch_done'] = False
