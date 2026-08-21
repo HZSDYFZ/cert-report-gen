@@ -253,16 +253,14 @@ else:
 
     if 'batch_index' not in st.session_state:
         st.session_state['batch_index'] = 0
-    if 'batch_results' not in st.session_state:
-        st.session_state['batch_results'] = []
-    if 'batch_errors' not in st.session_state:
-        st.session_state['batch_errors'] = []
     if 'batch_total' not in st.session_state:
         st.session_state['batch_total'] = 0
     if 'batch_parsed' not in st.session_state:
         st.session_state['batch_parsed'] = False
     if 'batch_done' not in st.session_state:
         st.session_state['batch_done'] = False
+    if '_excel_key' not in st.session_state:
+        st.session_state['_excel_key'] = ''
 
     if excel_file and tpl_file2:
         try:
@@ -274,7 +272,7 @@ else:
                 st.session_state['batch_original_trs'] = original_trs
                 st.session_state['batch_parsed'] = True
 
-            if '_excel_key' not in st.session_state or st.session_state.get('_excel_key') != excel_file.name:
+            if st.session_state.get('_excel_key') != excel_file.name:
                 wb = openpyxl.load_workbook(io.BytesIO(excel_file.getvalue()), data_only=True)
                 ws = wb.active
                 headers = [c.value for c in ws[1]]
@@ -282,108 +280,87 @@ else:
                 rows_data = []
                 for row in ws.iter_rows(min_row=2):
                     vals = [c.value for c in row]
-                    if vals[3]:
+                    if vals[2]:
                         rows_data.append(vals)
                 st.session_state['batch_rows_data'] = rows_data
                 st.session_state['batch_total'] = len(rows_data)
                 st.session_state['_excel_key'] = excel_file.name
                 st.session_state['batch_index'] = 0
-                st.session_state['batch_results'] = []
-                st.session_state['batch_errors'] = []
                 st.session_state['batch_done'] = False
+                # Clear old results to free memory
+                for k in ['batch_results', 'batch_zip_buf', 'batch_errors']:
+                    st.session_state.pop(k, None)
 
             total = st.session_state['batch_total']
-            already_generated = len(st.session_state['batch_results'])
-            st.success('Read ' + str(total) + ' rows | Generated so far: ' + str(already_generated))
-
-            if already_generated > 0:
-                prog = min(already_generated / total * 100, 100)
-                st.progress(prog / 100)
-                st.write('Progress: ' + str(already_generated) + ' / ' + str(total))
+            index = st.session_state['batch_index']
+            st.success('Read ' + str(total) + ' rows | Generated so far: ' + str(index) + ' / ' + str(total))
+            if total > 0:
+                st.progress(index / total)
 
             col_a, col_b, col_c = st.columns(3)
             with col_a:
-                gen_btn = st.button('Generate Next 20', type='primary', disabled=(st.session_state['batch_index'] >= total))
+                gen_btn = st.button('Generate Next ' + str(BATCH_SIZE), type='primary', disabled=(index >= total))
             with col_b:
-                if already_generated > 0:
-                    st.download_button('Download Current Batch',
-                        data=make_batch_zip(st.session_state['batch_results']),
-                        file_name='reports_part_' + str(already_generated) + '.zip',
-                        mime='application/zip')
+                zip_buf = st.session_state.get('batch_zip_buf')
+                if zip_buf is not None and index > 0:
+                    zip_buf.seek(0)
+                    st.download_button('Download ZIP', data=zip_buf,
+                        file_name='reports_' + str(index) + '.zip', mime='application/zip')
             with col_c:
                 if st.button('Clear & Start Over'):
-                    for k in ['batch_index', 'batch_results', 'batch_errors', 'batch_total', 'batch_parsed', 'batch_done', '_excel_key', 'batch_other_files', 'batch_original_doc_xml', 'batch_original_trs', 'batch_rows_data']:
+                    for k in ['batch_index', 'batch_total', 'batch_parsed', 'batch_done', '_excel_key',
+                              'batch_other_files', 'batch_original_doc_xml', 'batch_original_trs',
+                              'batch_rows_data', 'batch_results', 'batch_zip_buf', 'batch_errors']:
                         st.session_state.pop(k, None)
                     st.rerun()
 
-            if gen_btn and st.session_state['batch_index'] < total:
-                with st.spinner('Generating reports...'):
+            if gen_btn and index < total:
+                with st.spinner('Generating ' + str(BATCH_SIZE) + ' reports...'):
                     other_files = st.session_state['batch_other_files']
                     original_doc_xml = st.session_state['batch_original_doc_xml']
                     original_trs = st.session_state['batch_original_trs']
                     rows_data = st.session_state['batch_rows_data']
-                    idx = st.session_state['batch_index']
-                    end_idx = min(idx + BATCH_SIZE, total)
-                    new_results = list(st.session_state.get('batch_results', []))
-                    new_errors = list(st.session_state.get('batch_errors', []))
-                    for ri in range(idx, end_idx):
-                        rv = rows_data[ri]
-                        company = rv[2]
-                        audit_team = rv[3]
-                        audit_type = rv[4]
-                        audit_address = rv[6]
-                        cert_scope = rv[7]
-                        task_no = rv[8]
-                        conclusion = rv[10]
-                        date_val = rv[11]
-                        ds = format_date(date_val)
-                        leader = str(audit_team).split('+')[0].strip() if audit_team else ''
-                        d = {'company': str(company) if company else '', 'taskNo': str(task_no) if task_no else '',
-                             'leader': leader, 'auditType': str(audit_type) if audit_type else '',
-                             'address': str(audit_address) if audit_address else '',
-                             'scope': str(cert_scope) if cert_scope else '',
-                             'date': ds, 'conclusion': str(conclusion) if conclusion else ''}
-                        try:
-                            row_trs = fill_one_row(original_trs, d)
-                            rb = build_docx(other_files, original_doc_xml, row_trs)
-                            ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                            new_results.append((sanitize(str(company)) + '_' + ts + '.docx', rb))
-                        except Exception as e:
-                            new_errors.append(str(company) + ': ' + str(e))
-                    st.session_state['batch_results'] = new_results
-                    st.session_state['batch_errors'] = new_errors
+                    end_idx = min(index + BATCH_SIZE, total)
+                    buf = io.BytesIO()
+                    with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zfout:
+                        for ri in range(index, end_idx):
+                            rv = rows_data[ri]
+                            company = rv[2]; audit_team = rv[3]; audit_type = rv[4]
+                            audit_address = rv[6]; cert_scope = rv[7]; task_no = rv[8]
+                            conclusion = rv[10]; date_val = rv[11]
+                            ds = format_date(date_val)
+                            leader = str(audit_team).split('+')[0].strip() if audit_team else ''
+                            d = {'company': str(company) if company else '', 'taskNo': str(task_no) if task_no else '',
+                                 'leader': leader, 'auditType': str(audit_type) if audit_type else '',
+                                 'address': str(audit_address) if audit_address else '',
+                                 'scope': str(cert_scope) if cert_scope else '',
+                                 'date': ds, 'conclusion': str(conclusion) if conclusion else ''}
+                            try:
+                                row_trs = fill_one_row(original_trs, d)
+                                rb = build_docx(other_files, original_doc_xml, row_trs)
+                                fname = sanitize(str(company)) + '.docx'
+                                zfout.writestr(fname, rb)
+                            except Exception as e:
+                                st.text('Error: ' + str(company) + ' - ' + str(e))
+                    buf.seek(0)
+                    st.session_state['batch_results'] = buf.getvalue()
+                    st.session_state['batch_zip_buf'] = buf
                     st.session_state['batch_index'] = end_idx
                     if end_idx >= total:
                         st.session_state['batch_done'] = True
                     st.rerun()
 
-            # Download button after each batch
-            already_generated = len(st.session_state.get('batch_results', []))
-            if already_generated > 0:
-                st.download_button(
-                    'Download This Batch (ZIP)',
-                    data=make_batch_zip(st.session_state['batch_results']),
-                    file_name='reports_batch_' + str(already_generated) + '.zip',
-                    mime='application/zip'
-                )
-
-            if st.session_state.get('batch_errors'):
-                st.warning(str(len(st.session_state['batch_errors'])) + ' failed')
-                for e in st.session_state['batch_errors'][:5]:
-                    st.text('  - ' + e)
-
             if st.session_state.get('batch_done'):
-                buf = io.BytesIO()
-                with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zfout:
-                    for fn, fd in st.session_state['batch_results']:
-                        zfout.writestr(fn, fd)
-                buf.seek(0)
-                st.download_button('Download All Reports (ZIP)', data=buf,
-                    file_name='reports_all_' + datetime.now().strftime('%Y%m%d_%H%M') + '.zip',
-                    mime='application/zip')
                 st.success('All ' + str(total) + ' reports generated!')
+                zip_buf = st.session_state.get('batch_zip_buf')
+                if zip_buf is not None:
+                    zip_buf.seek(0)
+                    st.download_button('Download All (ZIP)', data=zip_buf,
+                        file_name='reports_all.zip', mime='application/zip')
 
         except Exception as e:
             st.error('Error: ' + str(e))
+    elif excel_file or tpl_file2:
+        st.info('Please upload both files')
     elif excel_file or tpl_file2:
         st.info('Please upload both files')
