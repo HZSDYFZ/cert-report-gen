@@ -6,6 +6,15 @@ from datetime import datetime
 st.set_page_config(page_title='Cert Report Generator', page_icon='📋', layout='wide')
 st.title('认证报告生成器')
 
+if 'batch_progress' not in st.session_state:
+    st.session_state['batch_progress'] = 0
+if 'batch_done' not in st.session_state:
+    st.session_state['batch_done'] = False
+if 'batch_result' not in st.session_state:
+    st.session_state['batch_result'] = None
+if 'batch_error' not in st.session_state:
+    st.session_state['batch_error'] = None
+
 def sanitize(name):
     return re.sub(r'[\\/:*?<>|]', '_', str(name))
 
@@ -77,7 +86,6 @@ def extract_form_data(form_bytes):
     return data
 
 def parse_template(template_bytes):
-    """Parse template once. Returns (other_files, original_doc_xml, table_rows)."""
     with zipfile.ZipFile(io.BytesIO(template_bytes)) as zfin:
         contents = {n: zfin.read(n) for n in zfin.namelist()}
     xml_str = contents['word/document.xml'].decode('utf-8')
@@ -94,7 +102,6 @@ def parse_template(template_bytes):
     return other_files, original_doc_xml, original_trs
 
 def fill_one_row(original_trs, data):
-    """Apply data to a copy of original table rows."""
     company = str(data.get('company', '')).strip()
     task_no = str(data.get('taskNo', '')).strip()
     leader = str(data.get('leader', '')).strip()
@@ -196,7 +203,6 @@ def fill_one_row(original_trs, data):
     return trs
 
 def build_docx(other_files, original_doc_xml, trs):
-    """Build one docx from parsed template parts."""
     tbl_start = original_doc_xml.find('<w:tbl>')
     tbl_match = re.search(r'<w:tbl[^>]*>(?:(?!</w:tbl>).)*</w:tbl>', original_doc_xml[tbl_start:], re.DOTALL)
     tbl_end = tbl_start + tbl_match.end()
@@ -210,7 +216,6 @@ def build_docx(other_files, original_doc_xml, trs):
     return buf.getvalue()
 
 def fill_template(template_bytes, data):
-    """Full fill for single report mode."""
     other_files, original_doc_xml, original_trs = parse_template(template_bytes)
     trs = fill_one_row(original_trs, data)
     return build_docx(other_files, original_doc_xml, trs)
@@ -276,7 +281,6 @@ else:
                 else:
                     with st.spinner('Parsing template...'):
                         other_files, original_doc_xml, original_trs = parse_template(tpl_file2.getvalue())
-                    progress = st.progress(0, text='Generating 0/' + str(total))
                     results, errors = [], []
                     for ri, rv in enumerate(rows_data):
                         company = rv[3]
@@ -307,21 +311,33 @@ else:
                             results.append((fname, rb))
                         except Exception as e:
                             errors.append(str(company) + ': ' + str(e))
-                        progress.progress((ri + 1) / total, text='Generating ' + str(ri + 1) + '/' + str(total))
-                    if results:
-                        buf = io.BytesIO()
-                        with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zfout:
-                            for fn, fd in results:
-                                zfout.writestr(fn, fd)
-                        buf.seek(0)
-                        st.download_button('Download All (ZIP)', data=buf,
-                            file_name='reports_' + datetime.now().strftime('%Y%m%d_%H%M') + '.zip',
-                            mime='application/zip')
-                        st.success('Generated ' + str(len(results)) + ' reports')
-                    if errors:
-                        st.warning(str(len(errors)) + ' failed')
-                        for e in errors[:5]:
-                            st.text('  - ' + e)
+                        st.session_state['batch_progress'] = (ri + 1) / total
+                    st.session_state['batch_done'] = True
+                    st.session_state['batch_result'] = (results, errors)
+            # Show progress bar from session state (outside button handler)
+            if st.session_state['batch_progress'] > 0 and not st.session_state['batch_done']:
+                st.progress(st.session_state['batch_progress'],
+                    text='Generating ' + str(int(st.session_state['batch_progress'] * total)) + '/' + str(total))
+            if st.session_state['batch_done'] and st.session_state['batch_result'] is not None:
+                results, errors = st.session_state['batch_result']
+                if results:
+                    buf = io.BytesIO()
+                    with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zfout:
+                        for fn, fd in results:
+                            zfout.writestr(fn, fd)
+                    buf.seek(0)
+                    st.download_button('Download All (ZIP)', data=buf,
+                        file_name='reports_' + datetime.now().strftime('%Y%m%d_%H%M') + '.zip',
+                        mime='application/zip')
+                    st.success('Generated ' + str(len(results)) + ' reports')
+                if errors:
+                    st.warning(str(len(errors)) + ' failed')
+                    for e in errors[:5]:
+                        st.text('  - ' + e)
+                # Reset for next run
+                st.session_state['batch_progress'] = 0
+                st.session_state['batch_done'] = False
+                st.session_state['batch_result'] = None
         except ImportError:
             st.error('Need openpyxl')
         except Exception as e:
