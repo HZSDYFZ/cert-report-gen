@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
 import zipfile, re, io, os
+import openpyxl
 from datetime import datetime
 
 st.set_page_config(page_title='Cert Report Generator', page_icon='📋', layout='wide')
@@ -263,7 +264,6 @@ else:
         tpl_file2 = st.file_uploader('Report Template (.docx)', type=['docx'], key='b2')
     if excel_file and tpl_file2:
         try:
-            import openpyxl
             wb = openpyxl.load_workbook(io.BytesIO(excel_file.getvalue()), data_only=True)
             ws = wb.active
             headers = [c.value for c in ws[1]]
@@ -338,9 +338,9 @@ else:
                 st.session_state['batch_progress'] = 0
                 st.session_state['batch_done'] = False
                 st.session_state['batch_result'] = None
-        except ImportError:
-            st.error('Need openpyxl')
+
         except Exception as e:
             st.error('Error: ' + str(e))
     elif excel_file or tpl_file2:
         st.info('Please upload both files')
+
