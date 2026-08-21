@@ -277,13 +277,8 @@ else:
                 ws = wb.active
                 headers = [c.value for c in ws[1]]
                 st.write('Headers: ' + str(headers))
-                rows_data = []
-                for row in ws.iter_rows(min_row=2):
-                    vals = [c.value for c in row]
-                    if vals[2]:
-                        rows_data.append(vals)
                 st.session_state['_excel_bytes'] = excel_file.getvalue()
-                st.session_state['batch_total'] = len(rows_data)
+                st.session_state['batch_total'] = ws.max_row - 1
                 st.session_state['_excel_key'] = excel_file.name
                 st.session_state['batch_index'] = 0
                 st.session_state['batch_done'] = False
