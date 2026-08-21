@@ -207,6 +207,7 @@ def make_batch_zip(results_list):
     buf.seek(0)
     return buf.getvalue()
 
+
 mode = st.radio('选择模式', ['Single Report', 'Batch Generation'], horizontal=True)
 
 if mode == 'Single Report':
@@ -273,22 +274,27 @@ else:
                 st.session_state['batch_parsed'] = True
 
             if st.session_state.get('_excel_key') != excel_file.name:
-                wb = openpyxl.load_workbook(io.BytesIO(excel_file.getvalue()), data_only=True)
+                excel_bytes = excel_file.getvalue()
+                wb = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True)
                 ws = wb.active
                 headers = [c.value for c in ws[1]]
                 st.write('Headers: ' + str(headers))
-                st.session_state['_excel_bytes'] = excel_file.getvalue()
-                st.session_state['batch_total'] = sum(1 for r in ws.iter_rows(min_row=2) if r[2].value)
+                # Count actual data rows (rows with company name in col 2)
+                total = 0
+                for row in ws.iter_rows(min_row=2):
+                    if row[2].value:
+                        total += 1
+                st.session_state['batch_total'] = total
                 st.session_state['_excel_key'] = excel_file.name
                 st.session_state['batch_index'] = 0
                 st.session_state['batch_done'] = False
-                # Clear old results to free memory
-                for k in ['batch_results', 'batch_zip_buf', 'batch_errors']:
-                    st.session_state.pop(k, None)
+                st.session_state['batch_excel_bytes'] = excel_bytes
+                st.session_state.pop('batch_zip_buf', None)
+                st.info('Total data rows: ' + str(total))
 
             total = st.session_state['batch_total']
             index = st.session_state['batch_index']
-            st.success('Read ' + str(total) + ' rows | Generated so far: ' + str(index) + ' / ' + str(total))
+            st.success('Generated so far: ' + str(index) + ' / ' + str(total))
             if total > 0:
                 st.progress(index / total)
 
@@ -305,7 +311,7 @@ else:
                 if st.button('Clear & Start Over'):
                     for k in ['batch_index', 'batch_total', 'batch_parsed', 'batch_done', '_excel_key',
                               'batch_other_files', 'batch_original_doc_xml', 'batch_original_trs',
-                              '_excel_bytes', 'batch_zip_buf', 'batch_errors']:
+                              'batch_excel_bytes', 'batch_zip_buf']:
                         st.session_state.pop(k, None)
                     st.rerun()
 
@@ -314,15 +320,23 @@ else:
                     other_files = st.session_state['batch_other_files']
                     original_doc_xml = st.session_state['batch_original_doc_xml']
                     original_trs = st.session_state['batch_original_trs']
-                    excel_bytes = st.session_state['_excel_bytes']
+                    excel_bytes = st.session_state['batch_excel_bytes']
                     end_idx = min(index + BATCH_SIZE, total)
+                    # Open workbook once per batch
+                    wb = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True)
+                    ws = wb.active
                     buf = io.BytesIO()
-                    with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zfout:
+                    with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as z:
                         for ri in range(index, end_idx):
-                            rv = [c.value for c in openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True).active[ri + 2]]
-                            company = rv[2]; audit_team = rv[3]; audit_type = rv[4]
-                            audit_address = rv[6]; cert_scope = rv[7]; task_no = rv[8]
-                            conclusion = rv[10]; date_val = rv[11]
+                            row = [c.value for c in ws[ri + 2]]
+                            company = row[2]
+                            audit_team = row[3]
+                            audit_type = row[4]
+                            audit_address = row[6]
+                            cert_scope = row[7]
+                            task_no = row[8]
+                            conclusion = row[10]
+                            date_val = row[11]
                             ds = format_date(date_val)
                             leader = str(audit_team).split('+')[0].strip() if audit_team else ''
                             d = {'company': str(company) if company else '', 'taskNo': str(task_no) if task_no else '',
@@ -333,12 +347,10 @@ else:
                             try:
                                 row_trs = fill_one_row(original_trs, d)
                                 rb = build_docx(other_files, original_doc_xml, row_trs)
-                                fname = sanitize(str(company)) + '.docx'
-                                zfout.writestr(fname, rb)
+                                z.writestr(sanitize(str(company)) + '.docx', rb)
                             except Exception as e:
                                 st.text('Error: ' + str(company) + ' - ' + str(e))
                     buf.seek(0)
-                    st.session_state['batch_results'] = buf.getvalue()
                     st.session_state['batch_zip_buf'] = buf
                     st.session_state['batch_index'] = end_idx
                     if end_idx >= total:
