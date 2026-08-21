@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import streamlit as st
 import zipfile, re, io, os
 from datetime import datetime
@@ -27,6 +27,23 @@ def format_date(val):
         return f'{y}-{m.group(1).zfill(2)}-{m.group(2).zfill(2)}'
     return s
 
+def count_data_rows(ws, company_col):
+    max_r = ws.max_row
+    limit = min(max_r, 5000)
+    count = 0
+    last_data = 0
+    for ri, row in enumerate(ws.iter_rows(min_row=2, max_row=limit), 2):
+        if row[company_col].value is not None:
+            count += 1
+            last_data = ri
+    if last_data > 0 and last_data < max_r:
+        for ri, row in enumerate(ws.iter_rows(min_row=last_data+1, max_row=min(max_r, last_data+100)), last_data+1):
+            if any(c.value is not None for c in row):
+                count += 1
+            else:
+                break
+    return count
+
 def set_form_checkbox(xml_str, index):
     pattern = r'<w:fldChar[^>]*w:fldCharType="begin"[^>]*>.*?</w:fldChar>'
     matches = list(re.finditer(pattern, xml_str, re.DOTALL))
@@ -37,7 +54,10 @@ def set_form_checkbox(xml_str, index):
     return xml_str
 
 def replace_unicode_checkbox(cell_xml, target_char, new_char):
-    return cell_xml.replace(f'<w:t>{target_char}</w:t>', f'<w:t>{new_char}</w:t>')
+    return cell_xml.replace(target_char, new_char)
+
+def set_checkbox_by_text(cell_xml, old_text, new_text):
+    return cell_xml.replace(old_text, new_text)
 
 def extract_form_data(form_bytes):
     with zipfile.ZipFile(io.BytesIO(form_bytes)) as z:
@@ -153,17 +173,17 @@ def fill_one_row(original_trs, data):
         is_transfer = '转移' in audit_type
         is_special = '特殊' in audit_type
         if is_initial:
-            cells3[0] = replace_unicode_checkbox(cells3[0], '□', '☑')
-            cells3[0] = replace_unicode_checkbox(cells3[0], '☑', '□')
+            cells3[1] = set_checkbox_by_text(cells3[1], '□初审', '☑初审')
+            cells3[1] = set_checkbox_by_text(cells3[1], '☑', '□')
         elif is_surv:
-            cells3[0] = replace_unicode_checkbox(cells3[0], '□', '☑')
-            cells3[0] = replace_unicode_checkbox(cells3[0], '☑', '□')
+            pass  # 监审 already checked by default, leave as is
         else:
-            cells3[0] = replace_unicode_checkbox(cells3[0], '☑', '□')
+            cells3[1] = set_checkbox_by_text(cells3[1], '□初审', '□初审')
+            pass
         if is_recert or is_transfer:
-            cells3[1] = replace_unicode_checkbox(cells3[1], '□', '☑')
+            cells3[1] = set_checkbox_by_text(cells3[1], '□再认证/转移', '☑再认证/转移')
         elif is_special:
-            cells3[1] = replace_unicode_checkbox(cells3[1], '□', '☑')
+            cells3[1] = set_checkbox_by_text(cells3[1], '□特殊审核', '☑特殊审核')
         trs[3] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: cells3[0]+cells3[1], trs[3], count=1, flags=re.DOTALL)
     cells21 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[21])
     if len(cells21) >= 2:
@@ -279,8 +299,22 @@ else:
                 ws = wb.active
                 headers = [c.value for c in ws[1]]
                 st.write('Headers: ' + str(headers))
-                # Count actual data rows (rows with company name in col 2)
-                total = sum(1 for row in ws.iter_rows(min_row=2, max_row=min(ws.max_row, 5000)) if row[2].value)
+                # Auto-detect Excel format
+                ncols = ws.max_column
+                if ncols >= 15:
+                    # Format A: 望(1) - 15 cols, company at col 3, no conclusion/date
+                    company_col, leader_col, type_col = 3, 4, 5
+                    addr_col, scope_col, task_col = 12, 13, 14
+                    concl_col, date_col = None, None
+                    total = count_data_rows(ws, 3)
+                    st.session_state['batch_col_fmt'] = 'A'
+                else:
+                    # Format B: 郑NEW - 12 cols, company at col 2, has conclusion/date
+                    company_col, leader_col, type_col = 2, 3, 4
+                    addr_col, scope_col, task_col = 6, 7, 8
+                    concl_col, date_col = 10, 11
+                    total = count_data_rows(ws, 2)
+                    st.session_state['batch_col_fmt'] = 'B'
                 st.session_state['batch_total'] = total
                 st.session_state['_excel_key'] = excel_file.name
                 st.session_state['batch_index'] = 0
@@ -319,21 +353,29 @@ else:
                     original_trs = st.session_state['batch_original_trs']
                     excel_bytes = st.session_state['batch_excel_bytes']
                     end_idx = min(index + BATCH_SIZE, total)
-                    # Open workbook once per batch
+                    fmt = st.session_state.get('batch_col_fmt', 'B')
+                    # Collect actual data rows efficiently
                     wb = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True)
                     ws = wb.active
+                    data_rows = []
+                    for row in ws.iter_rows(min_row=2):
+                        vals = [c.value for c in row]
+                        if vals[3 if fmt=='A' else 2]:
+                            data_rows.append(vals)
+                        if len(data_rows) >= total:
+                            break
                     buf = io.BytesIO()
                     with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as z:
-                        for ri in range(index, end_idx):
-                            row = [c.value for c in ws[ri + 2]]
-                            company = row[2]
-                            audit_team = row[3]
-                            audit_type = row[4]
-                            audit_address = row[6]
-                            cert_scope = row[7]
-                            task_no = row[8]
-                            conclusion = row[10]
-                            date_val = row[11]
+                        for di in range(index, end_idx):
+                            row = data_rows[di]
+                            if fmt == 'A':
+                                company = row[3]; audit_team = row[4]; audit_type = row[5]
+                                audit_address = row[12]; cert_scope = row[13]; task_no = row[14]
+                                conclusion = None; date_val = None
+                            else:
+                                company = row[2]; audit_team = row[3]; audit_type = row[4]
+                                audit_address = row[6]; cert_scope = row[7]; task_no = row[8]
+                                conclusion = row[10]; date_val = row[11]
                             ds = format_date(date_val)
                             leader = str(audit_team).split('+')[0].strip() if audit_team else ''
                             d = {'company': str(company) if company else '', 'taskNo': str(task_no) if task_no else '',
@@ -350,7 +392,7 @@ else:
                     buf.seek(0)
                     st.session_state['batch_zip_buf'] = buf
                     st.session_state['batch_index'] = end_idx
-                    if end_idx >= total:
+                    if end_idx >= len(data_rows):
                         st.session_state['batch_done'] = True
                     st.rerun()
 
