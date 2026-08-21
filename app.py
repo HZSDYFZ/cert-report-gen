@@ -357,5 +357,3 @@ else:
             st.error('Error: ' + str(e))
     elif excel_file or tpl_file2:
         st.info('Please upload both files')
-    elif excel_file or tpl_file2:
-        st.info('Please upload both files')
