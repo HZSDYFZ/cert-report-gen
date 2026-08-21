@@ -7,6 +7,8 @@ import openpyxl
 st.set_page_config(page_title='Cert Report Generator', page_icon='📋', layout='wide')
 st.title('认证报告生成器')
 
+BATCH_SIZE = 20
+
 def sanitize(name):
     return re.sub(r'[\\/:*?<>|]', '_', str(name))
 
@@ -91,8 +93,6 @@ def parse_template(template_bytes):
     original_doc_xml = xml_str
     original_trs = list(trs)
     other_files = {n: v for n, v in contents.items() if n != 'word/document.xml'}
-    del contents, xml_str, tbl_xml, row_parts, trs
-    gc.collect()
     return other_files, original_doc_xml, original_trs
 
 def fill_one_row(original_trs, data):
@@ -252,6 +252,19 @@ else:
         excel_file = st.file_uploader('Cert Excel (.xlsx)', type=['xlsx'], key='b1')
     with col2:
         tpl_file2 = st.file_uploader('Report Template (.docx)', type=['docx'], key='b2')
+    
+    # Initialize session state
+    if 'batch_parsed' not in st.session_state:
+        st.session_state['batch_parsed'] = None
+    if 'batch_rows' not in st.session_state:
+        st.session_state['batch_rows'] = []
+    if 'batch_total' not in st.session_state:
+        st.session_state['batch_total'] = 0
+    if 'batch_current' not in st.session_state:
+        st.session_state['batch_current'] = 0
+    if 'batch_complete' not in st.session_state:
+        st.session_state['batch_complete'] = False
+    
     if excel_file and tpl_file2:
         try:
             wb = openpyxl.load_workbook(io.BytesIO(excel_file.getvalue()), data_only=True)
@@ -263,22 +276,30 @@ else:
                 vals = [c.value for c in row]
                 if vals[3]:
                     rows_data.append(vals)
+            
             total = len(rows_data)
-            st.success('Read ' + str(total) + ' rows')
-            if st.button('Generate All (ZIP)', type='primary'):
-                if total == 0:
-                    st.warning('No valid rows found')
+            st.session_state['batch_total'] = total
+            st.session_state['batch_rows'] = rows_data
+            
+            st.success(f'Read {total} rows')
+            st.write(f'Batches: {(total + BATCH_SIZE - 1) // BATCH_SIZE} x {BATCH_SIZE}')
+            
+            if st.button('Generate Next Batch', type='primary'):
+                current = st.session_state['batch_current']
+                if current >= total:
+                    st.session_state['batch_complete'] = True
+                    st.success('All batches completed!')
                 else:
-                    # Show status updates
-                    status_placeholder = st.empty()
-                    status_placeholder.text('Parsing template...')
+                    end = min(current + BATCH_SIZE, total)
+                    status = st.empty()
+                    status.text(f'Generating batch {current // BATCH_SIZE + 1}: {current + 1}-{end}/{total}')
+                    
                     try:
                         other_files, original_doc_xml, original_trs = parse_template(tpl_file2.getvalue())
-                        gc.collect()
-                        status_placeholder.text('Generating reports... 0/' + str(total))
                         results = []
                         errors = []
-                        for ri, rv in enumerate(rows_data):
+                        for ri in range(current, end):
+                            rv = rows_data[ri]
                             try:
                                 company = rv[3]
                                 audit_team = rv[4]
@@ -307,8 +328,9 @@ else:
                                 results.append((fname, rb))
                             except Exception as e:
                                 errors.append(str(rv[3]) + ': ' + str(e))
-                            status_placeholder.text('Generating reports... ' + str(ri + 1) + '/' + str(total))
-                        gc.collect()
+                        
+                        status.text(f'Done! Generated {len(results)} reports, {len(errors)} errors')
+                        
                         if results:
                             buf = io.BytesIO()
                             with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zfout:
@@ -316,18 +338,44 @@ else:
                                     zfout.writestr(fn, fd)
                             zipped = buf.getvalue()
                             buf.close()
-                            st.download_button('Download All (ZIP)', data=zipped,
-                                file_name='reports_' + datetime.now().strftime('%Y%m%d_%H%M') + '.zip',
-                                mime='application/zip')
-                            st.success('Generated ' + str(len(results)) + ' reports')
+                            st.download_button(
+                                f'Download Batch {current // BATCH_SIZE + 1} ({len(results)} files)',
+                                data=zipped,
+                                file_name=f'batch_{current // BATCH_SIZE + 1}_{datetime.now().strftime("%Y%m%d_%H%M")}.zip',
+                                mime='application/zip'
+                            )
+                            st.success(f'Batch {current // BATCH_SIZE + 1} ready! Download and clear to continue.')
+                        
                         if errors:
-                            st.warning(str(len(errors)) + ' failed')
-                            for e in errors[:5]:
+                            st.warning(f'{len(errors)} failed')
+                            for e in errors[:3]:
                                 st.text('  - ' + e)
+                        
+                        # Clear template from memory
+                        del other_files, original_doc_xml, original_trs
+                        gc.collect()
+                        
+                        # Update progress
+                        st.session_state['batch_current'] = end
+                        if end >= total:
+                            st.session_state['batch_complete'] = True
+                            st.success(f'All {total} reports generated in {(total + BATCH_SIZE - 1) // BATCH_SIZE} batches!')
+                    
                     except Exception as e:
-                        st.error('Generation error: ' + str(e))
-        except ImportError:
-            st.error('Need openpyxl')
+                        status.error('Error: ' + str(e))
+                        st.error(str(e))
+            
+            # Show progress
+            current = st.session_state['batch_current']
+            total = st.session_state['batch_total']
+            if current > 0 and current < total:
+                st.info(f'Progress: {current}/{total} ({current/total*100:.1f}%)')
+                st.write(f'Next batch: rows {current+1} to {min(current+BATCH_SIZE, total)}')
+            
+            if st.session_state.get('batch_complete', False):
+                st.balloons()
+                st.success('All done!')
+                
         except Exception as e:
             st.error('Error: ' + str(e))
     elif excel_file or tpl_file2:
