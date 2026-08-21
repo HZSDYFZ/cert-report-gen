@@ -101,6 +101,7 @@ def fill_one_row(original_trs, data):
     scope = str(data.get('scope', '')).strip()
     conclusion = str(data.get('conclusion', '')).strip()
     trs = list(original_trs)
+    # Row 0: company + task no
     cells0 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[0])
     if len(cells0) >= 2:
         c0, c1 = cells0[0], cells0[1]
@@ -129,6 +130,7 @@ def fill_one_row(original_trs, data):
             else:
                 c1 = c1[:m.end()] + f'<w:t>{task_no}</w:t>' + c1[m.end():]
         trs[0] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: c0+c1, trs[0], count=1, flags=re.DOTALL)
+    # Row 1: leader
     cells1 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[1])
     if len(cells1) >= 2:
         c1 = cells1[1]
@@ -145,6 +147,7 @@ def fill_one_row(original_trs, data):
             else:
                 c1 = c1[:m.end()] + f'<w:t>{leader}</w:t>' + c1[m.end():]
         trs[1] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: cells1[0]+c1, trs[1], count=1, flags=re.DOTALL)
+    # Row 2: IATF/ISO
     cells2 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[2])
     if len(cells2) >= 2:
         is_iatf = 'IATF' in scope
@@ -154,6 +157,7 @@ def fill_one_row(original_trs, data):
         if is_iso: cells2[1] = replace_unicode_checkbox(cells2[1], '□', '☑')
         else: cells2[1] = replace_unicode_checkbox(cells2[1], '☑', '□')
         trs[2] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: cells2[0]+cells2[1], trs[2], count=1, flags=re.DOTALL)
+    # Row 3: audit type
     cells3 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[3])
     if len(cells3) >= 2:
         is_initial = '二阶段' in audit_type or '一阶段' in audit_type
@@ -174,6 +178,7 @@ def fill_one_row(original_trs, data):
         elif is_special:
             cells3[1] = replace_unicode_checkbox(cells3[1], '□', '☑')
         trs[3] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: cells3[0]+cells3[1], trs[3], count=1, flags=re.DOTALL)
+    # Row 21: conclusion
     cells21 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[21])
     if len(cells21) >= 2:
         is_initial = '二阶段' in audit_type or '一阶段' in audit_type or '再认证' in audit_type
@@ -265,54 +270,62 @@ else:
                 if total == 0:
                     st.warning('No valid rows found')
                 else:
-                    with st.spinner('Parsing template...'):
+                    progress_bar = st.progress(0, text='0/' + str(total))
+                    status_text = st.empty()
+                    status_text.text('Parsing template...')
+                    try:
                         other_files, original_doc_xml, original_trs = parse_template(tpl_file2.getvalue())
-                    results, errors = [], []
-                    for ri, rv in enumerate(rows_data):
-                        company = rv[3]
-                        audit_team = rv[4]
-                        audit_type = rv[5]
-                        audit_address = rv[12]
-                        cert_scope = rv[13]
-                        task_no = rv[14]
-                        conclusion = rv[16]
-                        date_val = rv[17]
-                        ds = format_date(date_val)
-                        leader = str(audit_team).split('+')[0].strip() if audit_team else ''
-                        d = {
-                            'company': str(company) if company else '',
-                            'taskNo': str(task_no) if task_no else '',
-                            'leader': leader,
-                            'auditType': str(audit_type) if audit_type else '',
-                            'address': str(audit_address) if audit_address else '',
-                            'scope': str(cert_scope) if cert_scope else '',
-                            'date': ds,
-                            'conclusion': str(conclusion) if conclusion else '',
-                        }
-                        try:
-                            row_trs = fill_one_row(original_trs, d)
-                            rb = build_docx(other_files, original_doc_xml, row_trs)
-                            ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                            fname = sanitize(str(company)) + '_' + ts + '.docx'
-                            results.append((fname, rb))
-                        except Exception as e:
-                            errors.append(str(company) + ': ' + str(e))
-                    if results:
-                        buf = io.BytesIO()
-                        with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zfout:
-                            for fn, fd in results:
-                                zfout.writestr(fn, fd)
-                        buf.seek(0)
-                        st.download_button('Download All (ZIP)', data=buf,
-                            file_name='reports_' + datetime.now().strftime('%Y%m%d_%H%M') + '.zip',
-                            mime='application/zip')
-                        st.success('Generated ' + str(len(results)) + ' reports')
-                    if errors:
-                        st.warning(str(len(errors)) + ' failed')
-                        for e in errors[:5]:
-                            st.text('  - ' + e)
+                        status_text.text('Generating reports...')
+                        results, errors = [], []
+                        for ri, rv in enumerate(rows_data):
+                            try:
+                                company = rv[3]
+                                audit_team = rv[4]
+                                audit_type = rv[5]
+                                audit_address = rv[12]
+                                cert_scope = rv[13]
+                                task_no = rv[14]
+                                conclusion = rv[16]
+                                date_val = rv[17]
+                                ds = format_date(date_val)
+                                leader = str(audit_team).split('+')[0].strip() if audit_team else ''
+                                d = {
+                                    'company': str(company) if company else '',
+                                    'taskNo': str(task_no) if task_no else '',
+                                    'leader': leader,
+                                    'auditType': str(audit_type) if audit_type else '',
+                                    'address': str(audit_address) if audit_address else '',
+                                    'scope': str(cert_scope) if cert_scope else '',
+                                    'date': ds,
+                                    'conclusion': str(conclusion) if conclusion else '',
+                                }
+                                row_trs = fill_one_row(original_trs, d)
+                                rb = build_docx(other_files, original_doc_xml, row_trs)
+                                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                                fname = sanitize(str(company)) + '_' + ts + '.docx'
+                                results.append((fname, rb))
+                            except Exception as e:
+                                errors.append(str(rv[3]) + ': ' + str(e))
+                            progress_bar.progress((ri + 1) / total, text=str(ri + 1) + '/' + str(total))
+                        if results:
+                            buf = io.BytesIO()
+                            with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zfout:
+                                for fn, fd in results:
+                                    zfout.writestr(fn, fd)
+                            buf.seek(0)
+                            st.download_button('Download All (ZIP)', data=buf,
+                                file_name='reports_' + datetime.now().strftime('%Y%m%d_%H%M') + '.zip',
+                                mime='application/zip')
+                            st.success('Generated ' + str(len(results)) + ' reports')
+                        if errors:
+                            st.warning(str(len(errors)) + ' failed')
+                            for e in errors[:5]:
+                                st.text('  - ' + e)
+                    except Exception as e:
+                        st.error('Generation error: ' + str(e))
+        except ImportError:
+            st.error('Need openpyxl')
         except Exception as e:
             st.error('Error: ' + str(e))
     elif excel_file or tpl_file2:
         st.info('Please upload both files')
-
