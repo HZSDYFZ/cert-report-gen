@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import streamlit as st
 import zipfile, re, io, os
 from datetime import datetime
@@ -328,11 +328,14 @@ else:
                     new_errors = list(st.session_state.get('batch_errors', []))
                     for ri in range(idx, end_idx):
                         rv = rows_data[ri]
-                        company = rv[3]; audit_team = rv[4]; audit_type = rv[5]
-                        audit_address = rv[12]; cert_scope = rv[13]; task_no = rv[14]
-                        conclusion = rv[16]; date_val = rv[17]
-                        ds = format_date(date_val)
-                        leader = str(audit_team).split('+')[0].strip() if audit_team else ''
+                        company = rv[2]
+                        audit_team = rv[3]
+                        audit_type = rv[4]
+                        audit_address = rv[6]
+                        cert_scope = rv[7]
+                        task_no = rv[8]
+                        conclusion = rv[10]
+                        date_val = rv[11]
                         d = {'company': str(company) if company else '', 'taskNo': str(task_no) if task_no else '',
                              'leader': leader, 'auditType': str(audit_type) if audit_type else '',
                              'address': str(audit_address) if audit_address else '',
