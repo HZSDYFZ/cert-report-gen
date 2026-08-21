@@ -249,7 +249,7 @@ else:
     with col2:
         tpl_file2 = st.file_uploader('Report Template (.docx)', type=['docx'], key='b2')
 
-    BATCH_SIZE = 5
+    BATCH_SIZE = 3
 
     if 'batch_index' not in st.session_state:
         st.session_state['batch_index'] = 0
