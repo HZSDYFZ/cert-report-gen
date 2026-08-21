@@ -357,6 +357,16 @@ else:
                         st.session_state['batch_done'] = True
                     st.rerun()
 
+            # Download button after each batch
+            already_generated = len(st.session_state.get('batch_results', []))
+            if already_generated > 0:
+                st.download_button(
+                    'Download This Batch (ZIP)',
+                    data=make_batch_zip(st.session_state['batch_results']),
+                    file_name='reports_batch_' + str(already_generated) + '.zip',
+                    mime='application/zip'
+                )
+
             if st.session_state.get('batch_errors'):
                 st.warning(str(len(st.session_state['batch_errors'])) + ' failed')
                 for e in st.session_state['batch_errors'][:5]:
