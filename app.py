@@ -336,6 +336,8 @@ else:
                         task_no = rv[8]
                         conclusion = rv[10]
                         date_val = rv[11]
+                        ds = format_date(date_val)
+                        leader = str(audit_team).split('+')[0].strip() if audit_team else ''
                         d = {'company': str(company) if company else '', 'taskNo': str(task_no) if task_no else '',
                              'leader': leader, 'auditType': str(audit_type) if audit_type else '',
                              'address': str(audit_address) if audit_address else '',
