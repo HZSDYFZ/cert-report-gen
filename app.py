@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
-import zipfile, re, io, os
+import zipfile, re, io, os, gc
 from datetime import datetime
 import openpyxl
 
@@ -91,6 +91,8 @@ def parse_template(template_bytes):
     original_doc_xml = xml_str
     original_trs = list(trs)
     other_files = {n: v for n, v in contents.items() if n != 'word/document.xml'}
+    del contents, xml_str, tbl_xml, row_parts, trs
+    gc.collect()
     return other_files, original_doc_xml, original_trs
 
 def fill_one_row(original_trs, data):
@@ -101,7 +103,6 @@ def fill_one_row(original_trs, data):
     scope = str(data.get('scope', '')).strip()
     conclusion = str(data.get('conclusion', '')).strip()
     trs = list(original_trs)
-    # Row 0: company + task no
     cells0 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[0])
     if len(cells0) >= 2:
         c0, c1 = cells0[0], cells0[1]
@@ -130,7 +131,6 @@ def fill_one_row(original_trs, data):
             else:
                 c1 = c1[:m.end()] + f'<w:t>{task_no}</w:t>' + c1[m.end():]
         trs[0] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: c0+c1, trs[0], count=1, flags=re.DOTALL)
-    # Row 1: leader
     cells1 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[1])
     if len(cells1) >= 2:
         c1 = cells1[1]
@@ -147,7 +147,6 @@ def fill_one_row(original_trs, data):
             else:
                 c1 = c1[:m.end()] + f'<w:t>{leader}</w:t>' + c1[m.end():]
         trs[1] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: cells1[0]+c1, trs[1], count=1, flags=re.DOTALL)
-    # Row 2: IATF/ISO
     cells2 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[2])
     if len(cells2) >= 2:
         is_iatf = 'IATF' in scope
@@ -157,7 +156,6 @@ def fill_one_row(original_trs, data):
         if is_iso: cells2[1] = replace_unicode_checkbox(cells2[1], '□', '☑')
         else: cells2[1] = replace_unicode_checkbox(cells2[1], '☑', '□')
         trs[2] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: cells2[0]+cells2[1], trs[2], count=1, flags=re.DOTALL)
-    # Row 3: audit type
     cells3 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[3])
     if len(cells3) >= 2:
         is_initial = '二阶段' in audit_type or '一阶段' in audit_type
@@ -178,7 +176,6 @@ def fill_one_row(original_trs, data):
         elif is_special:
             cells3[1] = replace_unicode_checkbox(cells3[1], '□', '☑')
         trs[3] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: cells3[0]+cells3[1], trs[3], count=1, flags=re.DOTALL)
-    # Row 21: conclusion
     cells21 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[21])
     if len(cells21) >= 2:
         is_initial = '二阶段' in audit_type or '一阶段' in audit_type or '再认证' in audit_type
@@ -195,17 +192,19 @@ def fill_one_row(original_trs, data):
     return trs
 
 def build_docx(other_files, original_doc_xml, trs):
-    tbl_start = original_doc_xml.find('<w:tbl>')
-    tbl_match = re.search(r'<w:tbl[^>]*>(?:(?!</w:tbl>).)*</w:tbl>', original_doc_xml[tbl_start:], re.DOTALL)
-    tbl_end = tbl_start + tbl_match.end()
-    new_tbl = trs[0] + ''.join(trs[1:])
-    new_doc_xml = original_doc_xml[:tbl_start] + new_tbl + original_doc_xml[tbl_end:]
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zout:
+        tbl_start = original_doc_xml.find('<w:tbl>')
+        tbl_match = re.search(r'<w:tbl[^>]*>(?:(?!</w:tbl>).)*</w:tbl>', original_doc_xml[tbl_start:], re.DOTALL)
+        tbl_end = tbl_start + tbl_match.end()
+        new_tbl = trs[0] + ''.join(trs[1:])
+        new_doc_xml = original_doc_xml[:tbl_start] + new_tbl + original_doc_xml[tbl_end:]
         zout.writestr('word/document.xml', new_doc_xml.encode('utf-8'))
         for name, content in other_files.items():
             zout.writestr(name, content)
-    return buf.getvalue()
+    result = buf.getvalue()
+    buf.close()
+    return result
 
 def fill_template(template_bytes, data):
     other_files, original_doc_xml, original_trs = parse_template(template_bytes)
@@ -270,13 +269,15 @@ else:
                 if total == 0:
                     st.warning('No valid rows found')
                 else:
-                    progress_bar = st.progress(0, text='0/' + str(total))
-                    status_text = st.empty()
-                    status_text.text('Parsing template...')
+                    # Show status updates
+                    status_placeholder = st.empty()
+                    status_placeholder.text('Parsing template...')
                     try:
                         other_files, original_doc_xml, original_trs = parse_template(tpl_file2.getvalue())
-                        status_text.text('Generating reports...')
-                        results, errors = [], []
+                        gc.collect()
+                        status_placeholder.text('Generating reports... 0/' + str(total))
+                        results = []
+                        errors = []
                         for ri, rv in enumerate(rows_data):
                             try:
                                 company = rv[3]
@@ -306,14 +307,16 @@ else:
                                 results.append((fname, rb))
                             except Exception as e:
                                 errors.append(str(rv[3]) + ': ' + str(e))
-                            progress_bar.progress((ri + 1) / total, text=str(ri + 1) + '/' + str(total))
+                            status_placeholder.text('Generating reports... ' + str(ri + 1) + '/' + str(total))
+                        gc.collect()
                         if results:
                             buf = io.BytesIO()
                             with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zfout:
                                 for fn, fd in results:
                                     zfout.writestr(fn, fd)
-                            buf.seek(0)
-                            st.download_button('Download All (ZIP)', data=buf,
+                            zipped = buf.getvalue()
+                            buf.close()
+                            st.download_button('Download All (ZIP)', data=zipped,
                                 file_name='reports_' + datetime.now().strftime('%Y%m%d_%H%M') + '.zip',
                                 mime='application/zip')
                             st.success('Generated ' + str(len(results)) + ' reports')
