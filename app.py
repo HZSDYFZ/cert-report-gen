@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 import streamlit as st
 import zipfile, re, io, os
 from datetime import datetime
@@ -282,7 +282,7 @@ else:
                     vals = [c.value for c in row]
                     if vals[2]:
                         rows_data.append(vals)
-                st.session_state['batch_rows_data'] = rows_data
+                st.session_state['_excel_bytes'] = excel_file.getvalue()
                 st.session_state['batch_total'] = len(rows_data)
                 st.session_state['_excel_key'] = excel_file.name
                 st.session_state['batch_index'] = 0
@@ -310,7 +310,7 @@ else:
                 if st.button('Clear & Start Over'):
                     for k in ['batch_index', 'batch_total', 'batch_parsed', 'batch_done', '_excel_key',
                               'batch_other_files', 'batch_original_doc_xml', 'batch_original_trs',
-                              'batch_rows_data', 'batch_results', 'batch_zip_buf', 'batch_errors']:
+                              '_excel_bytes', 'batch_zip_buf', 'batch_errors']:
                         st.session_state.pop(k, None)
                     st.rerun()
 
@@ -319,12 +319,12 @@ else:
                     other_files = st.session_state['batch_other_files']
                     original_doc_xml = st.session_state['batch_original_doc_xml']
                     original_trs = st.session_state['batch_original_trs']
-                    rows_data = st.session_state['batch_rows_data']
+                    excel_bytes = st.session_state['_excel_bytes']
                     end_idx = min(index + BATCH_SIZE, total)
                     buf = io.BytesIO()
                     with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zfout:
                         for ri in range(index, end_idx):
-                            rv = rows_data[ri]
+                            rv = [c.value for c in openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True).active[ri + 2]]
                             company = rv[2]; audit_team = rv[3]; audit_type = rv[4]
                             audit_address = rv[6]; cert_scope = rv[7]; task_no = rv[8]
                             conclusion = rv[10]; date_val = rv[11]
