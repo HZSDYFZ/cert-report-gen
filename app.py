@@ -32,8 +32,7 @@ def format_date(val):
     s = str(val).strip()
     m = re.search(r"(\d{4})[年\-/](\d{1,2})[月\-/](\d{1,2})", s)
     if m: return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
-    return s[:10] if len(s)>=10 
-else
+    return s[:10] if len(s)>=10 else s
 def get_conclusion(atype):
     atype=str(atype).strip() if atype else ""
     is_surv="监" in atype
