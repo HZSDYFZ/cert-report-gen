@@ -1,485 +1,264 @@
-# -*- coding: utf-8 -*-
-import streamlit as st
-import zipfile, re, io, os
+﻿# -*- coding: utf-8 -*-
+import io, os, re, zipfile, sys
 from datetime import datetime
+import streamlit as st
 import openpyxl
-
-st.set_page_config(page_title='Cert Report Generator', page_icon='📋', layout='wide')
-st.title('认证报告生成器')
-
-def sanitize(name):
-    return re.sub(r'[\\/:*?<>|]', '_', str(name))
-
+from docx import Document
+sys.stdout.reconfigure(encoding="utf-8")
+CHK_EMPTY = chr(0x25A1)
+CHK_FILLED = chr(0x25A0)
+def set_cb(run, text):
+    if run.text is None: run.text = text
+    else: run.text = run.text.replace(CHK_EMPTY, text).replace(CHK_FILLED, text)
+def fill_cb(doc, target, checked=True):
+    fill = CHK_FILLED if checked else CHK_EMPTY
+    for para in doc.paragraphs:
+        for run in para.runs:
+            if run.text and target in run.text:
+                set_cb(run, fill)
+                return True
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    for run in para.runs:
+                        if run.text and target in run.text:
+                            set_cb(run, fill)
+                            return True
+    return False
 def format_date(val):
-    if val is None: return ''
-    if isinstance(val, datetime): return val.strftime('%Y-%m-%d')
-    if isinstance(val, (int, float)):
-        try: return (datetime(1899, 12, 30) + __import__('datetime').timedelta(days=int(val))).strftime('%Y-%m-%d')
-        except: return ''
+    if val is None: return ""
+    if isinstance(val, datetime): return val.strftime("%Y-%m-%d")
     s = str(val).strip()
-    if not s or s == '#N/A': return ''
-    m = re.search(r'(\d{4})[年\-\/](\d{1,2})[月\-\/](\d{1,2})', s)
-    if m: return f'{m.group(1)}-{m.group(2).zfill(2)}-{m.group(3).zfill(2)}'
-    m = re.search(r'(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})', s)
-    if m:
-        y = int(m.group(3))
-        if y < 100: y += 2000
-        return f'{y}-{m.group(1).zfill(2)}-{m.group(2).zfill(2)}'
-    return s
-
-def count_data_rows(ws, company_col):
-    last_data = 0
-    count = 0
-    for ri, row in enumerate(ws.iter_rows(min_row=2), 2):
-        vals = [c.value for c in row]
-        if any(v is not None for v in vals):
-            last_data = ri
-        if vals[company_col] is not None:
-            count += 1
-    return count
-
-def set_cb(cell_xml, target):
-    """Set checkbox checked for target text."""
-    cb_off = chr(9633)  # □ U+25A1
-    cb_on = chr(9745)   # ☑ U+2611
-    cell_xml = cell_xml.replace(cb_off + target, cb_on + target)
-    for m in re.finditer(re.escape(target), cell_xml):
-        pos = m.start()
-        open_tag = cell_xml.rfind('<w:t', 0, pos)
-        if open_tag < 0:
-            open_tag = cell_xml.rfind('<w:t>', 0, pos)
-        if open_tag >= 0:
-            close_tag = cell_xml.find('</w:t>', pos)
-            if close_tag > pos:
-                tag_match = re.match(r'<w:t[^>]*>', cell_xml[open_tag:])
-                tag_len = len(tag_match.group()) if tag_match else 5
-                content = cell_xml[open_tag+tag_len:close_tag]
-                if cb_off in content:
-                    cell_xml = cell_xml[:open_tag+tag_len] + content.replace(cb_off, cb_on, 1) + cell_xml[close_tag:]
-                    break
-    return cell_xml
-
-def unset_cb(cell_xml, target):
-    """Unset checkbox for target text."""
-    cb_off = chr(9633)  # □ U+25A1
-    cb_on = chr(9745)   # ☑ U+2611
-    cell_xml = cell_xml.replace(cb_on + target, cb_off + target)
-    for m in re.finditer(re.escape(target), cell_xml):
-        pos = m.start()
-        open_tag = cell_xml.rfind('<w:t', 0, pos)
-        if open_tag < 0:
-            open_tag = cell_xml.rfind('<w:t>', 0, pos)
-        if open_tag >= 0:
-            close_tag = cell_xml.find('</w:t>', pos)
-            if close_tag > pos:
-                tag_match = re.match(r'<w:t[^>]*>', cell_xml[open_tag:])
-                tag_len = len(tag_match.group()) if tag_match else 5
-                content = cell_xml[open_tag+tag_len:close_tag]
-                if cb_on in content:
-                    cell_xml = cell_xml[:open_tag+tag_len] + content.replace(cb_on, cb_off, 1) + cell_xml[close_tag:]
-                    break
-    return cell_xml
-
-def set_form_checkbox(xml_str, index):
-    pattern = r'<w:fldChar[^>]*w:fldCharType="begin"[^>]*>.*?<w:fldChar[^>]*w:fldCharType="end"[^>]*>'
-    matches = list(re.finditer(pattern, xml_str, re.DOTALL))
-    if index < len(matches):
-        cb = matches[index].group(0)
-        new_cb = re.sub(r'w:checked w:val="0"', 'w:checked w:val="1"', cb)
-        xml_str = xml_str[:matches[index].start()] + new_cb + xml_str[matches[index].end():]
-    return xml_str
-
-def unset_form_checkbox(xml_str, index):
-    pattern = r'<w:fldChar[^>]*w:fldCharType="begin"[^>]*>.*?<w:fldChar[^>]*w:fldCharType="end"[^>]*>'
-    matches = list(re.finditer(pattern, xml_str, re.DOTALL))
-    if index < len(matches):
-        cb = matches[index].group(0)
-        new_cb = re.sub(r'w:checked w:val="1"', 'w:checked w:val="0"', cb)
-        xml_str = xml_str[:matches[index].start()] + new_cb + xml_str[matches[index].end():]
-    return xml_str
-
-def extract_form_data(form_bytes):
-    with zipfile.ZipFile(io.BytesIO(form_bytes)) as z:
-        xml = z.read('word/document.xml').decode('utf-8')
-    texts = re.findall(r'<w:t[^>]*>([^<]*)</w:t>', xml)
-    data = {}
-    i = 0
-    while i < len(texts):
-        t = texts[i].strip()
-        if not data.get('company') and t in ('组织名称', '公司名称'):
-            if i + 1 < len(texts):
-                nxt = texts[i + 1].strip()
-                if nxt: data['company'] = nxt
-        elif not data.get('taskNo') and t in ('任务编号', '任务号'):
-            if i + 1 < len(texts):
-                nxt = texts[i + 1].strip()
-                if nxt and not any(k in nxt for k in ['合同', '备注', '认证', '审核']):
-                    data['taskNo'] = nxt
-        elif not data.get('leader') and ('审核组长' in t or t == '组长') and i + 1 < len(texts):
-            nxt = texts[i + 1].strip()
-            if nxt and len(nxt) < 30:
-                data['leader'] = nxt.split('+')[0].strip()
-        elif not data.get('address') and '审核地址' in t and i + 1 < len(texts):
-            nxt = texts[i + 1].strip()
-            if nxt: data['address'] = nxt
-        elif not data.get('scope') and '认证范围' in t and i + 1 < len(texts):
-            nxt = texts[i + 1].strip()
-            if nxt: data['scope'] = nxt
-        elif not data.get('auditType') and '审核性质' in t and i + 1 < len(texts):
-            nxt = texts[i + 1].strip()
-            if nxt: data['auditType'] = nxt
-        elif not data.get('date') and '现场审核日期' in t and i + 1 < len(texts):
-            nxt = texts[i + 1].strip()
-            if nxt:
-                m = re.search(r'(\d{4})[\/-]\d{1,2}[\/-]\d{1,2}', nxt)
-                if m: data['date'] = m.group(0)
-        i += 1
-    return data
-
-def parse_template(template_bytes):
-    with zipfile.ZipFile(io.BytesIO(template_bytes)) as zfin:
-        contents = {n: zfin.read(n) for n in zfin.namelist()}
-    xml_str = contents['word/document.xml'].decode('utf-8')
-    tbl_start = xml_str.find('<w:tbl>')
-    tbl_match = re.search(r'<w:tbl[^>]*>(?:(?!</w:tbl>).)*</w:tbl>', xml_str[tbl_start:], re.DOTALL)
-    if tbl_match is None: raise Exception('No table found in template')
-    tbl_xml = xml_str[tbl_start:tbl_start + tbl_match.end()]
-    row_parts = re.split(r'(<w:tr[^>]*>.*?</w:tr>)', tbl_xml, flags=re.DOTALL)
-    trs = [p for p in row_parts if p.startswith('<w:tr')]
-    if len(trs) < 22: raise Exception(f'Expected 22+ rows, got {len(trs)}')
-    other_files = {n: v for n, v in contents.items() if n != 'word/document.xml'}
-    return other_files, xml_str, list(trs)
-
-def fill_one_row(original_trs, data):
-    company = str(data.get('company', '')).strip()
-    task_no = str(data.get('taskNo', '')).strip()
-    leader = str(data.get('leader', '')).strip()
-    audit_type = str(data.get('auditType', '')).strip()
-    scope = str(data.get('scope', '')).strip()
-    conclusion = str(data.get('conclusion', '')).strip()
-    address = str(data.get('address', '')).strip()
-    cert_standards = str(data.get('certStandards', '')).strip()
-    trs = list(original_trs)
-    # Row 0: Company name and task number
-    cells0 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[0])
-    if len(cells0) >= 2:
-        c0, c1 = cells0[0], cells0[1]
-        m = re.search(r'<w:t[^>]*>公司名称[^<]*</w:t>', c0)
-        if not m: m = re.search(r'<w:t[^>]*>组织名称[^<]*</w:t>', c0)
-        if m:
-            after = c0[m.end():]
-            tm = re.search(r'<w:t[^>]*>([^<]*)</w:t>', after)
-            if tm:
-                ph = tm.group(1)
-                if ph and ph.strip() and ph not in ('', ':', '\uff1a'):
-                    c0 = c0[:tm.start()] + f'<w:t>{company}</w:t>' + c0[tm.end():]
-                else:
-                    c0 = c0[:m.end()] + f'<w:t>{company}</w:t>' + c0[m.end():]
-            else:
-                c0 = c0[:m.end()] + f'<w:t>{company}</w:t>' + c0[m.end():]
-        m = re.search(r'<w:t[^>]*>任务号[^<]*</w:t>', c1)
-        if not m: m = re.search(r'<w:t[^>]*>任务编号[^<]*</w:t>', c1)
-        if m:
-            after = c1[m.end():]
-            tm = re.search(r'<w:t[^>]*>([^<]*)</w:t>', after)
-            if tm:
-                ph = tm.group(1)
-                if ph and ph.strip() and ph not in ('', '\uff1a'):
-                    c1 = c1[:tm.start()] + f'<w:t>{task_no}</w:t>' + c1[tm.end():]
-                else:
-                    c1 = c1[:m.end()] + f'<w:t>{task_no}</w:t>' + c1[m.end():]
-            else:
-                c1 = c1[:m.end()] + f'<w:t>{task_no}</w:t>' + c1[m.end():]
-        trs[0] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: c0+c1, trs[0], count=1, flags=re.DOTALL)
-    # Row 1: Audit team leader
-    cells1 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[1])
-    if len(cells1) >= 2:
-        c0 = cells1[0]
-        c1 = cells1[1]
-        m = re.search(r'<w:t[^>]*>审核组长[^<]*</w:t>', c0)
-        if not m: m = re.search(r'<w:t[^>]*>组长[^<]*</w:t>', c0)
-        if m:
-            tm = re.search(r'<w:t[^>]*>([^<]*)</w:t>', c1)
-            if tm:
-                ph = tm.group(1)
-                if ph and ph.strip():
-                    c1 = c1[:tm.start()] + f'<w:t>{leader}</w:t>' + c1[tm.end():]
-                else:
-                    lm = re.search(r'<w:t[^>]*>审核组长[^<]*</w:t>', c1)
-                    if not lm: lm = re.search(r'<w:t[^>]*>组长[^<]*</w:t>', c1)
-                    if lm:
-                        c1 = c1[:lm.end()] + f'<w:t>{leader}</w:t>' + c1[lm.end():]
-                    else:
-                        c1 = c1.replace('</w:tc>', f'<w:t>{leader}</w:t></w:tc>', 1)
-            else:
-                c1 = c1.replace('</w:tc>', f'<w:t>{leader}</w:t></w:tc>', 1)
-        trs[1] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: cells1[0]+c1, trs[1], count=1, flags=re.DOTALL)
-    # Row 2: Cert standards (unicode checkboxes)
-    cells2 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[2])
-    if len(cells2) >= 2:
-        has_iatf = 'IATF' in cert_standards or 'IATF' in scope
-        has_iso = 'ISO' in cert_standards or ('ISO' in scope and 'IATF' not in scope)
-        c2 = cells2[1]
-        if has_iatf: c2 = set_cb(c2, 'IATF16949:2016')
-        else: c2 = unset_cb(c2, 'IATF16949:2016')
-        if has_iso: c2 = set_cb(c2, 'ISO9001:2015')
-        else: c2 = unset_cb(c2, 'ISO9001:2015')
-        cells2[1] = c2
-        trs[2] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: cells2[0]+cells2[1], trs[2], count=1, flags=re.DOTALL)
-    # Row 3: Audit type (unicode checkboxes)
-    cells3 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[3])
-    if len(cells3) >= 2:
-        c3 = cells3[1]
-        is_initial = '二阶段' in audit_type or '一阶段' in audit_type
-        is_surv = '监' in audit_type
-        is_recert = '再认证' in audit_type
-        is_transfer = '转移' in audit_type
-        is_special = '特殊' in audit_type
-        c3 = unset_cb(c3, '初审')
-        c3 = unset_cb(c3, '监')
-        c3 = unset_cb(c3, '再认证/转移')
-        c3 = unset_cb(c3, '特殊审核')
-        c3 = unset_cb(c3, '其它')
-        if is_initial:
-            c3 = set_cb(c3, '初审')
-        elif is_surv:
-            c3 = set_cb(c3, '监')
-        if is_recert or is_transfer:
-            c3 = set_cb(c3, '再认证/转移')
-        elif is_special:
-            c3 = set_cb(c3, '特殊审核')
-        cells3[1] = c3
-        trs[3] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: cells3[0]+cells3[1], trs[3], count=1, flags=re.DOTALL)
-    # Row 4: Audit address
-    cells4 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[4])
-    if len(cells4) >= 2:
-        c4 = cells4[1]
-        m = re.search(r'<w:t[^>]*>审核地址[^<]*</w:t>', c4)
-        if m:
-            after = c4[m.end():]
-            tm = re.search(r'<w:t[^>]*>([^<]*)</w:t>', after)
-            if tm:
-                ph = tm.group(1)
-                if ph and ph.strip():
-                    c4 = c4[:tm.start()] + f'<w:t>{address}</w:t>' + c4[tm.end():]
-                else:
-                    c4 = c4[:m.end()] + f'<w:t>{address}</w:t>' + c4[m.end():]
-            else:
-                c4 = c4[:m.end()] + f'<w:t>{address}</w:t>' + c4[m.end():]
-        trs[4] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: cells4[0]+c4, trs[4], count=1, flags=re.DOTALL)
-    # Row 5: Certification scope
-    cells5 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[5])
-    if len(cells5) >= 2:
-        c5 = cells5[1]
-        m = re.search(r'<w:t[^>]*>认证范围[^<]*</w:t>', c5)
-        if m:
-            after = c5[m.end():]
-            tm = re.search(r'<w:t[^>]*>([^<]*)</w:t>', after)
-            if tm:
-                ph = tm.group(1)
-                if ph and ph.strip():
-                    c5 = c5[:tm.start()] + f'<w:t>{scope}</w:t>' + c5[tm.end():]
-                else:
-                    c5 = c5[:m.end()] + f'<w:t>{scope}</w:t>' + c5[m.end():]
-            else:
-                c5 = c5[:m.end()] + f'<w:t>{scope}</w:t>' + c5[m.end():]
-        trs[5] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: cells5[0]+c5, trs[5], count=1, flags=re.DOTALL)
-    # Row 21: Conclusion checkboxes (form fields)
-    cells21 = re.findall(r'(<w:tc[^>]*>.*?</w:tc>)', trs[21])
-    if len(cells21) >= 2:
-        c21 = cells21[1]
-        for idx in range(7):
-            c21 = unset_form_checkbox(c21, idx)
-        is_initial = '二阶段' in audit_type or '一阶段' in audit_type or '再认证' in audit_type
-        is_surv = '监' in audit_type
-        is_transfer = '转移' in audit_type
-        if is_initial:
-            c21 = set_form_checkbox(c21, 0)
-        elif is_transfer:
-            c21 = set_form_checkbox(c21, 2)
-        elif is_surv:
-            if '不换证' in conclusion:
-                c21 = set_form_checkbox(c21, 4)
-            elif '换发' in conclusion:
-                c21 = set_form_checkbox(c21, 5)
-            else:
-                c21 = set_form_checkbox(c21, 0)
-        cells21[1] = c21
-        trs[21] = re.sub(r'(<w:tc[^>]*>.*?</w:tc>){2}', lambda m: cells21[0]+c21, trs[21], count=1, flags=re.DOTALL)
-    return trs
-
-def build_docx(other_files, original_doc_xml, trs):
-    tbl_start = original_doc_xml.find('<w:tbl>')
-    tbl_match = re.search(r'<w:tbl[^>]*>(?:(?!</w:tbl>).)*</w:tbl>', original_doc_xml[tbl_start:], re.DOTALL)
-    tbl_end = tbl_start + tbl_match.end()
-    new_tbl = '<w:tbl>' + trs[0] + ''.join(trs[1:]) + '</w:tbl>'
-    new_doc_xml = original_doc_xml[:tbl_start] + new_tbl + original_doc_xml[tbl_end:]
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zout:
-        zout.writestr('word/document.xml', new_doc_xml.encode('utf-8'))
-        for name, content in other_files.items():
-            zout.writestr(name, content)
-    return buf.getvalue()
-
-def fill_template(template_bytes, data):
-    other_files, original_doc_xml, original_trs = parse_template(template_bytes)
-    trs = fill_one_row(original_trs, data)
-    return build_docx(other_files, original_doc_xml, trs)
-
-mode = st.radio('选择模式', ['Single Report', 'Batch Generation'], horizontal=True)
-
-if mode == 'Single Report':
-    st.header('Single Report Generation')
-    col1, col2 = st.columns(2)
-    with col1:
-        form_file = st.file_uploader('FORM6101 (.docx)', type=['docx'], key='s1')
-    with col2:
-        tpl_file = st.file_uploader('Report Template (.docx)', type=['docx'], key='s2')
-    data = None
-    if form_file and tpl_file:
-        try:
-            form_bytes = form_file.getvalue()
-            data = extract_form_data(form_bytes)
-        except Exception as e:
-            st.error('Parse failed: ' + str(e))
-            data = None
-    if data:
-        st.markdown('### Extracted Fields')
-        for k, v in data.items():
-            st.text('**' + k + '**: ' + str(v or '(not found)'))
-        if st.button('Generate Report', type='primary'):
-            try:
-                r = fill_template(tpl_file.getvalue(), data)
-                ts = datetime.now().strftime('%Y%m%d_%H%M')
-                fn = sanitize(data.get('company', 'Report')) + '_' + ts + '.docx'
-                st.download_button('Download', data=r, file_name=fn,
-                    mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
-                st.success('Generated!')
-            except Exception as e:
-                st.error('Failed: ' + str(e))
-    elif form_file or tpl_file:
-        st.info('Please upload both files')
-
+    m = re.search(r"(\d{4})[年\-/](\d{1,2})[月\-/](\d{1,2})", s)
+    if m: return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    return s[:10] if len(s)>=10 else sdef get_conclusion(atype):
+    atype=str(atype).strip() if atype else ""
+    is_surv="监" in atype
+    if "一阶段" in atype or "二阶段" in atype or "再认证" in atype:
+        return {"checked":[True,False,False,False,False,False],"fields":["通过，可发证","不通过","通过，可换发证书","不符合发证条件","通过，不换证","通过，可换发新的认证证书"]}
+    elif "转移" in atype:
+        return {"checked":[False,False,True,False,False,False],"fields":["通过，可发证","不通过","通过，可换发证书","不符合发证条件","通过，不换证","通过，可换发新的认证证书"]}
+    elif is_surv:
+        if "换发" in atype:
+            return {"checked":[False,False,False,False,False,True],"fields":["通过，可发证","不通过","通过，可换发证书","不符合发证条件","通过，不换证","通过，可换发新的认证证书"]}
+        else:
+            return {"checked":[False,False,False,False,True,False],"fields":["通过，可发证","不通过","通过，可换发证书","不符合发证条件","通过，不换证","通过，可换发新的认证证书"]}
+    else:
+        return {"checked":[True,False,False,False,False,False],"fields":["通过，可发证","不通过","通过，可换发证书","不符合发证条件","通过，不换证","通过，可换发新的认证证书"]}
+def fill_report(doc, fields):
+    reps={"{{company}}":fields.get("company",""),"{{taskNo}}":fields.get("taskNo",""),
+          "{{leader}}":fields.get("leader",""),"{{auditType}}":fields.get("auditType",""),
+          "{{address}}":fields.get("address",""),"{{scope}}":fields.get("scope",""),
+          "{{date}}":fields.get("date",datetime.now().strftime("%Y-%m-%d"))}
+    for para in doc.paragraphs:
+        for run in para.runs:
+            for k,v in reps.items():
+                if k in run.text: run.text=run.text.replace(k,v)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    for run in para.runs:
+                        for k,v in reps.items():
+                            if k in run.text: run.text=run.text.replace(k,v)
+    con=get_conclusion(fields.get("auditType",""))
+    for name,chk in zip(con["fields"],con["checked"]):
+        fill_cb(doc,name,chk)
+    return doc
+def gen_docx(tpl_bytes, fields):
+    buf=io.BytesIO(tpl_bytes)
+    with zipfile.ZipFile(buf,"r") as zf:
+        xml=zf.read("word/document.xml").decode("utf-8")
+        reps={"{{company}}":fields.get("company",""),"{{taskNo}}":fields.get("taskNo",""),
+              "{{leader}}":fields.get("leader",""),"{{auditType}}":fields.get("auditType",""),
+              "{{address}}":fields.get("address",""),"{{scope}}":fields.get("scope",""),
+              "{{date}}":fields.get("date",datetime.now().strftime("%Y-%m-%d"))}
+        for k,v in reps.items(): xml=xml.replace(k,v)
+        out=io.BytesIO()
+        with zipfile.ZipFile(out,"w",zipfile.ZIP_DEFLATED) as oz:
+            for name in zf.namelist():
+                if name=="word/document.xml": oz.writestr(name,xml.encode("utf-8"))
+                else: oz.writestr(name,zf.read(name))
+        return out.getvalue()
+def extract_form_fields(doc):
+    fields = {}
+    for table in doc.tables:
+        for ri, row in enumerate(table.rows):
+            cells = [c.text.strip() for c in row.cells]
+            if ri==1 and len(cells)>1 and cells[1]: fields["taskNo"]=cells[1]
+            if ri==2 and len(cells)>1 and cells[1]: fields["company"]=cells[1]
+            if ri==3 and len(cells)>1 and cells[1]: fields["address"]=cells[1]
+            if ri==11 and len(cells)>1 and cells[1]:
+                s=cells[1]
+                if s.startswith("IATF:"): s=s[5:]
+                fields["scope"]=s
+            if ri==14 and len(cells)>1 and cells[1]: fields["auditType"]=cells[1]
+            if ri==17 and len(cells)>1 and cells[1]: fields["leader"]=cells[1]
+    for para in doc.paragraphs:
+        t = para.text
+        if "任务编号" in t or "任务号" in t: fields["taskNo"]=re.split(r"[:：]",t)[-1].strip()
+        if "组织名称" in t or "公司名称" in t: fields["company"]=re.split(r"[:：]",t)[-1].strip()
+        if "审核组长" in t: fields["leader"]=re.split(r"[:：]",t)[-1].strip()
+        if "审核地址" in t: fields["address"]=re.split(r"[:：]",t)[-1].strip()
+        if "认证范围" in t or "IATF:" in t:
+            s=re.split(r"[:：]",t)[-1].strip()
+            if s.startswith("IATF:"): s=s[5:]
+            fields["scope"]=s
+        if "审核性质" in t or "审核类型" in t: fields["auditType"]=re.split(r"[:：]",t)[-1].strip()
+        m = re.search(r"(\d{4})[年\-/](\d{1,2})[月\-/](\d{1,2})", t)
+        if m and ("审核日期" in t or "现场审核日期" in t):
+            fields["date"]=f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    fields.setdefault("company",""); fields.setdefault("taskNo","")
+    fields.setdefault("leader",""); fields.setdefault("auditType","")
+    fields.setdefault("address",""); fields.setdefault("scope","")
+    fields.setdefault("date",datetime.now().strftime("%Y-%m-%d"))
+    return fields
+def detect_format(wb):
+    ws=wb.active
+    if ws.max_column>=15: return "A"
+    elif ws.max_column>=12: return "B"
+    return "unknown"
+def read_row(ws, row, fmt):
+    vals=[c.value for c in row]
+    if fmt=="A":
+        return {"company":str(vals[3]).strip() if vals[3] else "",
+                "leader":str(vals[4]).split("+")[0].strip() if vals[4] else "",
+                "auditType":str(vals[5]).strip() if vals[5] else "",
+                "address":str(vals[12]).strip() if vals[12] else "",
+                "scope":str(vals[13]).strip() if vals[13] else "",
+                "taskNo":str(vals[14]).strip() if vals[14] else ""}
+    else:
+        return {"company":str(vals[2]).strip() if vals[2] else "",
+                "leader":str(vals[3]).split("+")[0].strip() if vals[3] else "",
+                "auditType":str(vals[4]).strip() if vals[4] else "",
+                "address":str(vals[6]).strip() if vals[6] else "",
+                "scope":str(vals[7]).strip() if vals[7] else "",
+                "taskNo":str(vals[8]).strip() if vals[8] else "",
+                "date":format_date(vals[11]) if vals[11] else ""}
+def count_rows(ws):
+    c=0
+    for row in ws.iter_rows(min_row=2):
+        if any(cv.value for cv in row): c+=1
+    return c
+st.set_page_config(page_title="认证报告生成器",page_icon="\U0001f4cb",layout="wide")
+st.title("\U0001f4cb 认证报告生成器")
+if "mode" not in st.session_state: st.session_state.mode="single"
+if "batch_step" not in st.session_state: st.session_state.batch_step=0
+if "batch_total" not in st.session_state: st.session_state.batch_total=0
+if "batch_files" not in st.session_state: st.session_state.batch_files=[]
+if "batch_processed" not in st.session_state: st.session_state.batch_processed=0
+if "single_fields" not in st.session_state: st.session_state.single_fields={}
+if "form_doc" not in st.session_state: st.session_state.form_doc=None
+if "tpl_bytes" not in st.session_state: st.session_state.tpl_bytes=None
+if "expl" not in st.session_state: st.session_state.expl=None
+if "ws" not in st.session_state: st.session_state.ws=None
+if "excel_fmt" not in st.session_state: st.session_state.excel_fmt=None
+mode=st.radio("选择生成模式",["单个报告生成","批量生成"],key="mode")
+if mode=="单个报告生成":
+    st.header("\U0001f4c4 单个报告生成")
+    c1,c2=st.columns(2)
+    with c1:
+        st.subheader("第一步：上传 FORM6101")
+        ff=st.file_uploader("上传 FORM6101",type=["docx"],key="form_up")
+    with c2:
+        st.subheader("第二步：上传报告模板")
+        tf=st.file_uploader("上传报告模板",type=["docx"],key="tpl_up")
+    if ff and tf:
+        if st.session_state.form_doc is None or st.session_state.get("form_name")!=ff.name:
+            st.session_state.form_doc=ff.read()
+            st.session_state.form_name=ff.name
+            st.session_state.single_fields=extract_form_fields(Document(io.BytesIO(st.session_state.form_doc)))
+        if st.session_state.tpl_bytes is None or st.session_state.get("tpl_name")!=tf.name:
+            st.session_state.tpl_bytes=tf.read()
+            st.session_state.tpl_name=tf.name
+        f=st.session_state.single_fields
+        st.info(f"已提取：公司={f.get(chr(39)+'company'+chr(39),'')}, 任务号={f.get(chr(39)+'taskNo'+chr(39),'')}, 审核组长={f.get(chr(39)+'leader'+chr(39),'')}")
+        if st.button("\U0001f4c4 生成报告",type="primary",key="gen_s"):
+            with st.spinner("生成中..."):
+                try:
+                    doc=Document(io.BytesIO(st.session_state.tpl_bytes))
+                    doc=fill_report(doc,f)
+                    out=io.BytesIO()
+                    doc.save(out)
+                    out.seek(0)
+                    st.success("\u2705 报告生成成功！")
+                    st.download_button(label="\u2b07\ufe0f 下载报告",data=out.getvalue(),file_name=f"{f.get('company','报告')}.docx",mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                except Exception as e:
+                    st.error(f"生成失败：{e}")
+    elif ff or tf:
+        st.warning("请同时上传 FORM6101 和报告模板")
 else:
-    st.header('Batch Generation')
-    col1, col2 = st.columns(2)
-    with col1:
-        excel_file = st.file_uploader('Cert Excel (.xlsx)', type=['xlsx'], key='b1')
-    with col2:
-        tpl_file2 = st.file_uploader('Report Template (.docx)', type=['docx'], key='b2')
-    BATCH_SIZE = 20
-    for k in ['batch_index','batch_total','batch_parsed','batch_done','_excel_key']:
-        if k not in st.session_state: st.session_state[k] = {'batch_index':0,'batch_total':0,'batch_parsed':False,'batch_done':False,'_excel_key':''}[k]
-    if excel_file and tpl_file2:
-        try:
-            if not st.session_state.get('batch_parsed', False):
-                with st.spinner('Parsing template...'):
-                    of,od,ot = parse_template(tpl_file2.getvalue())
-                st.session_state['batch_other_files'] = of
-                st.session_state['batch_original_doc_xml'] = od
-                st.session_state['batch_original_trs'] = ot
-                st.session_state['batch_parsed'] = True
-            if st.session_state.get('_excel_key') != excel_file.name:
-                excel_bytes = excel_file.getvalue()
-                wb = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True)
-                ws = wb.active
-                headers = [c.value for c in ws[1]]
-                ncols = ws.max_column
-                if ncols >= 15:
-                    cc,lc,tc = 3,4,5
-                    ac,sc,tkc = 12,13,14
-                    conc,dtc = None,None
-                    total = count_data_rows(ws, cc)
-                    fmt = 'A'
-                else:
-                    cc,lc,tc = 2,3,4
-                    ac,sc,tkc = 6,7,8
-                    conc,dtc = 10,11
-                    total = count_data_rows(ws, cc)
-                    fmt = 'B'
-                st.write('Total data rows: ' + str(total))
-                st.session_state['batch_total'] = total
-                st.session_state['_excel_key'] = excel_file.name
-                st.session_state['batch_index'] = 0
-                st.session_state['batch_done'] = False
-                st.session_state['batch_excel_bytes'] = excel_bytes
-                st.session_state.pop('batch_zip_buf', None)
-                st.session_state.pop('batch_data_rows', None)
-                st.session_state['batch_col_fmt'] = fmt
-            total = st.session_state.get('batch_total', 0)
-            index = st.session_state.get('batch_index', 0)
-            st.write('Progress: ' + str(index) + ' / ' + str(total))
-            if total > 0: st.progress(index / total)
-            col_a,col_b,col_c = st.columns(3)
-            with col_a:
-                gen_btn = st.button('Generate Next '+str(BATCH_SIZE), type='primary', disabled=(index>=total))
-            with col_b:
-                zb = st.session_state.get('batch_zip_buf')
-                if zb is not None and index > 0:
+    st.header("\U0001f4e6 批量生成")
+    c1,c2=st.columns(2)
+    with c1:
+        ef=st.file_uploader("上传 Excel",type=["xlsx"],key="exc_up")
+    with c2:
+        tf=st.file_uploader("上传报告模板",type=["docx"],key="b_tpl_up")
+    if ef and tf:
+        if st.session_state.expl is None or st.session_state.get("exc_name")!=ef.name or st.session_state.get("b_tpl_name")!=tf.name:
+            wb=openpyxl.load_workbook(ef,data_only=True)
+            ws=wb.active
+            fmt=detect_format(wb)
+            total=count_rows(ws)
+            st.session_state.expl=wb
+            st.session_state.ws=ws
+            st.session_state.excel_fmt=fmt
+            st.session_state.batch_total=total
+            st.session_state.batch_processed=0
+            st.session_state.batch_step=0
+            st.session_state.batch_files=[]
+            st.session_state.expl_name=ef.name
+            st.session_state.b_tpl_name=tf.name
+            st.session_state.b_tpl_bytes=tf.read()
+        fmt=st.session_state.excel_fmt
+        total=st.session_state.batch_total
+        processed=st.session_state.batch_processed
+        fmt_label="A型(15列)" if fmt=="A" else "B型(12列)"
+        st.info(f"Excel格式：{fmt_label}，共 {total} 行数据")
+        prog=min((processed+20)/max(total,1),1.0) if total>0 else 0
+        st.progress(prog)
+        st.write(f"进度：{processed}/{total}")
+        if st.button("\u25b6\ufe0f 开始生成（每次20个）",key="b_start"):
+            with st.spinner("生成中..."):
+                ws=st.session_state.ws
+                fmt=st.session_state.excel_fmt
+                step=st.session_state.batch_step
+                start=2+step*20
+                end=min(start+20,total+1)
+                new=[]
+                for ri in range(start,end):
+                    row=list(ws.iter_rows(min_row=ri,max_row=ri))[0]
+                    f=read_row(ws,row,fmt)
+                    if not f.get("company"): continue
+                    try:
+                        b=gen_docx(st.session_state.b_tpl_bytes,f)
+                        new.append((f["company"],b))
+                    except Exception as e:
+                        st.error(f"{f['company']} 失败：{e}")
+                if new:
+                    st.session_state.batch_files.extend(new)
+                    st.session_state.batch_step+=1
+                    st.session_state.batch_processed=min(step*20+len(new),total)
+                    zb=io.BytesIO()
+                    with zipfile.ZipFile(zb,"w",zipfile.ZIP_DEFLATED) as zf:
+                        for n,d in new: zf.writestr(f"{n}.docx",d)
                     zb.seek(0)
-                    st.download_button('Download ZIP', data=zb, file_name='reports_'+str(index)+'.zip', mime='application/zip')
-            with col_c:
-                if st.button('Clear & Start Over'):
-                    for k in ['batch_index','batch_total','batch_parsed','batch_done','_excel_key','batch_other_files','batch_original_doc_xml','batch_original_trs','batch_excel_bytes','batch_zip_buf','batch_data_rows']:
-                        st.session_state.pop(k, None)
-                    st.rerun()
-            if gen_btn and index < total:
-                with st.spinner('Generating '+str(BATCH_SIZE)+' reports...'):
-                    of=st.session_state['batch_other_files']
-                    od=st.session_state['batch_original_doc_xml']
-                    ot=st.session_state['batch_original_trs']
-                    eb=st.session_state['batch_excel_bytes']
-                    end_idx = min(index+BATCH_SIZE, total)
-                    fmt=st.session_state.get('batch_col_fmt','B')
-                    cc=3 if fmt=='A' else 2
-                    lc,tc = (4,5) if fmt=='A' else (3,4)
-                    ac,sc,tkc = (12,13,14) if fmt=='A' else (6,7,8)
-                    conc,dtc = (None,None) if fmt=='A' else (10,11)
-                    wb=openpyxl.load_workbook(io.BytesIO(eb),data_only=True)
-                    ws=wb.active
-                    data_rows=[]
-                    for row in ws.iter_rows(min_row=2):
-                        vals=[c.value for c in row]
-                        if vals[cc]:
-                            data_rows.append(vals)
-                    st.session_state['batch_data_rows']=data_rows
-                    buf=io.BytesIO()
-                    with zipfile.ZipFile(buf,'w',compression=zipfile.ZIP_DEFLATED) as z:
-                        for di in range(index, min(end_idx,len(data_rows))):
-                            row=data_rows[di]
-                            company=row[cc];audit_team=row[lc];audit_type=row[tc]
-                            audit_address=row[ac];cert_scope=row[sc];task_no=row[tkc]
-                            conclusion=row[conc] if conc is not None else None
-                            date_val=row[dtc] if dtc is not None else None
-                            ds=format_date(date_val)
-                            leader=str(audit_team).split('+')[0].strip() if audit_team else ''
-                            d={'company':str(company) if company else '',
-                               'taskNo':str(task_no) if task_no else '',
-                               'leader':leader,
-                               'auditType':str(audit_type) if audit_type else '',
-                               'address':str(audit_address) if audit_address else '',
-                               'scope':str(cert_scope) if cert_scope else '',
-                               'date':ds,
-                               'conclusion':str(conclusion) if conclusion else ''}
-                            try:
-                                rt=fill_one_row(ot,d)
-                                rb=build_docx(of,od,rt)
-                                z.writestr(sanitize(str(company))+'.docx',rb)
-                            except Exception as e:
-                                st.text('Error: '+str(company)+' - '+str(e))
-                    buf.seek(0)
-                    st.session_state['batch_zip_buf']=buf
-                    st.session_state['batch_index']=end_idx
-                    if end_idx>=len(data_rows): st.session_state['batch_done']=True
-                    st.rerun()
-            if st.session_state.get('batch_done'):
-                st.success('All '+str(total)+' reports generated!')
-                zb=st.session_state.get('batch_zip_buf')
-                if zb is not None:
-                    zb.seek(0)
-                    st.download_button('Download All (ZIP)',data=zb,file_name='reports_all.zip',mime='application/zip')
-        except Exception as e:
-            st.error('Error: '+str(e))
-    elif excel_file or tpl_file2:
-        st.info('Please upload both files')
-
+                    st.session_state.curr_zip=zb.getvalue()
+                    st.success(f"\u2705 已生成 {len(new)} 个（累计 {st.session_state.batch_processed}/{total}）")
+                    st.download_button(label="\u2b07\ufe0f 下载本批 (ZIP)",data=st.session_state.curr_zip,file_name=f"reports_batch_{step+1}.zip",mime="application/zip")
+                    if st.session_state.batch_processed>=total:
+                        st.success("\U0001f389 全部生成完成！")
+                        if len(st.session_state.batch_files)>1:
+                            azb=io.BytesIO()
+                            with zipfile.ZipFile(azb,"w",zipfile.ZIP_DEFLATED) as zf:
+                                for n,d in st.session_state.batch_files: zf.writestr(f"{n}.docx",d)
+                            azb.seek(0)
+                            st.download_button(label="\u2b07\ufe0f 下载全部 (ZIP)",data=azb.getvalue(),file_name="all_reports.zip",mime="application/zip")
+        if st.button("\U0001f504 清除并重新开始",key="b_clear"):
+            st.session_state.batch_step=0; st.session_state.batch_processed=0
+            st.session_state.batch_files=[]; st.session_state.expl=None; st.rerun()
+    elif ef or tf:
+        st.warning("请同时上传 Excel 和报告模板")
+st.markdown("---")
+st.caption("认证报告生成器 v2.0")
