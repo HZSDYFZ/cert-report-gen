@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 import io, os, re, zipfile, sys
 from datetime import datetime
 import streamlit as st
@@ -32,7 +32,9 @@ def format_date(val):
     s = str(val).strip()
     m = re.search(r"(\d{4})[年\-/](\d{1,2})[月\-/](\d{1,2})", s)
     if m: return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
-    return s[:10] if len(s)>=10 else sdef get_conclusion(atype):
+    return s[:10] if len(s)>=10 
+else
+def get_conclusion(atype):
     atype=str(atype).strip() if atype else ""
     is_surv="监" in atype
     if "一阶段" in atype or "二阶段" in atype or "再认证" in atype:
