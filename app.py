@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import io, os, re, zipfile, sys
 from datetime import datetime
 import streamlit as st
@@ -173,7 +173,7 @@ if mode=="单个报告生成":
             st.session_state.tpl_bytes=tf.read()
             st.session_state.tpl_name=tf.name
         f=st.session_state.single_fields
-        st.info(f"已提取：公司={f.get(chr(39)+'company'+chr(39),'')}, 任务号={f.get(chr(39)+'taskNo'+chr(39),'')}, 审核组长={f.get(chr(39)+'leader'+chr(39),'')}")
+        st.info(f"已提取：公司={f.get('company','')}, 任务号={f.get('taskNo','')}, 审核组长={f.get('leader','')}")
         if st.button("\U0001f4c4 生成报告",type="primary",key="gen_s"):
             with st.spinner("生成中..."):
                 try:
@@ -262,3 +262,4 @@ else:
         st.warning("请同时上传 Excel 和报告模板")
 st.markdown("---")
 st.caption("认证报告生成器 v2.0")
+
