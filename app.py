@@ -354,7 +354,7 @@ else:
             st.session_state.batch_processed = 0
             st.session_state.batch_files = []
             st.session_state.expl = None
-            st.rerun()
+            st.experimental_rerun()
     elif ef or tf:
         st.warning('Please upload both Excel and template')
 
