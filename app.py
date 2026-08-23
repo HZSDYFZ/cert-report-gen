@@ -62,12 +62,6 @@ def get_conclusion(atype):
         return {'checked': [True, False, False, False, False, False],
                 'fields': ['通过，可发证', '不通过', '通过，可换发证书', '不符合发证条件', '通过，不换证', '通过，可换发新的认证证书']}
 
-def replace_in_run(run, text, value):
-    if run.text is None:
-        run.text = value
-    else:
-        run.text = run.text.replace(text, value)
-
 def fill_report(doc, fields):
     company = fields.get('company', '')
     taskNo = fields.get('taskNo', '')
@@ -75,87 +69,69 @@ def fill_report(doc, fields):
     auditType = fields.get('auditType', '')
     address = fields.get('address', '')
     scope = fields.get('scope', '')
-    date = fields.get('date', datetime.now().strftime('%Y-%m-%d'))
+    
+    # 只处理段落，不处理表格
+    filled = {'company': False, 'taskNo': False, 'leader': False, 'address': False, 'scope': False}
     
     for para in doc.paragraphs:
-        full_text = ''.join(run.text or '' for run in para.runs)
-        if '公司名称' in full_text and company:
-            for run in para.runs:
+        runs = list(para.runs)
+        full_text = ''.join(r.text or '' for r in runs)
+        
+        # 公司名称：找 "公司名称"，在它后面的 ": " 或 ":" 后面填值
+        if company and not filled['company'] and '公司名称' in full_text:
+            for i, run in enumerate(runs):
                 if run.text and '公司名称' in run.text:
-                    idx = run.text.find('公司名称')
-                    run.text = run.text[:idx+4] + company + run.text[idx+4:]
+                    # 在下一个run或当前run后面填充
+                    if i + 1 < len(runs):
+                        runs[i + 1].text = (runs[i + 1].text or '') + company
+                    else:
+                        run.text = run.text + company
+                    filled['company'] = True
                     break
-        if ('任务号' in full_text or '任务编号' in full_text) and taskNo:
-            for run in para.runs:
-                if run.text:
-                    for label in ['任务编号', '任务号']:
-                        if label in run.text:
-                            idx = run.text.find(label)
-                            run.text = run.text[:idx+len(label)] + taskNo + run.text[idx+len(label):]
-                            break
-        if '审核组长' in full_text and leader:
-            for run in para.runs:
+        
+        # 任务号：找 "任务号" 或 "任务编号"
+        if taskNo and not filled['taskNo'] and ('任务号' in full_text or '任务编号' in full_text):
+            for i, run in enumerate(runs):
+                if run.text and ('任务号' in run.text or '任务编号' in run.text):
+                    if i + 1 < len(runs):
+                        runs[i + 1].text = (runs[i + 1].text or '') + taskNo
+                    else:
+                        run.text = run.text + taskNo
+                    filled['taskNo'] = True
+                    break
+        
+        # 审核组长：找 "审核组长"
+        if leader and not filled['leader'] and '审核组长' in full_text:
+            for i, run in enumerate(runs):
                 if run.text and '审核组长' in run.text:
-                    idx = run.text.find('审核组长')
-                    run.text = run.text[:idx+4] + leader + run.text[idx+4:]
+                    if i + 1 < len(runs):
+                        runs[i + 1].text = (runs[i + 1].text or '') + leader
+                    else:
+                        run.text = run.text + leader
+                    filled['leader'] = True
                     break
-        if '审核地址' in full_text and address:
-            for run in para.runs:
+        
+        # 审核地址：找 "审核地址"
+        if address and not filled['address'] and '审核地址' in full_text:
+            for i, run in enumerate(runs):
                 if run.text and '审核地址' in run.text:
-                    idx = run.text.find('审核地址')
-                    run.text = run.text[:idx+4] + address + run.text[idx+4:]
+                    if i + 1 < len(runs):
+                        runs[i + 1].text = (runs[i + 1].text or '') + address
+                    else:
+                        run.text = run.text + address
+                    filled['address'] = True
                     break
-        if ('认证范围' in full_text or '审核范围' in full_text) and scope:
-            for run in para.runs:
-                if run.text:
-                    if '认证范围' in run.text:
-                        idx = run.text.find('认证范围')
-                        run.text = run.text[:idx+4] + scope + run.text[idx+4:]
-                        break
-                    elif '审核范围' in run.text:
-                        idx = run.text.find('审核范围')
-                        run.text = run.text[:idx+4] + scope + run.text[idx+4:]
-                        break
-    
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                full_text = ''.join(para.text for para in cell.paragraphs)
-                if '公司名称' in full_text and company:
-                    for para in cell.paragraphs:
-                        for run in para.runs:
-                            if run.text and '公司名称' in run.text:
-                                idx = run.text.find('公司名称')
-                                run.text = run.text[:idx+4] + company + run.text[idx+4:]
-                                break
-                if '任务号' in full_text and taskNo:
-                    for para in cell.paragraphs:
-                        for run in para.runs:
-                            if run.text and '任务号' in run.text:
-                                idx = run.text.find('任务号')
-                                run.text = run.text[:idx+3] + taskNo + run.text[idx+3:]
-                                break
-                if '审核组长' in full_text and leader:
-                    for para in cell.paragraphs:
-                        for run in para.runs:
-                            if run.text and '审核组长' in run.text:
-                                idx = run.text.find('审核组长')
-                                run.text = run.text[:idx+4] + leader + run.text[idx+4:]
-                                break
-                if '审核地址' in full_text and address:
-                    for para in cell.paragraphs:
-                        for run in para.runs:
-                            if run.text and '审核地址' in run.text:
-                                idx = run.text.find('审核地址')
-                                run.text = run.text[:idx+4] + address + run.text[idx+4:]
-                                break
-                if '认证范围' in full_text and scope:
-                    for para in cell.paragraphs:
-                        for run in para.runs:
-                            if run.text and '认证范围' in run.text:
-                                idx = run.text.find('认证范围')
-                                run.text = run.text[:idx+4] + scope + run.text[idx+4:]
-                                break
+        
+        # 认证范围：找 "认证范围"
+        if scope and not filled['scope'] and '认证范围' in full_text:
+            for i, run in enumerate(runs):
+                if run.text and '认证范围' in run.text:
+                    if i + 1 < len(runs):
+                        runs[i + 1].text = (runs[i + 1].text or '') + scope
+                    else:
+                        run.text = run.text + scope
+                    filled['scope'] = True
+                    break
     
     con = get_conclusion(auditType)
     for name, chk in zip(con['fields'], con['checked']):
