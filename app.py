@@ -37,11 +37,9 @@ def format_date(val):
     if isinstance(val, datetime):
         return val.strftime("%Y-%m-%d")
     s = str(val).strip()
-    # Handle MM/DD/YYYY format
     m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", s)
     if m:
         return m.group(3) + "-" + m.group(1).zfill(2) + "-" + m.group(2).zfill(2)
-    # Handle YYYY-MM-DD or YYYY/MM/DD
     m = re.search(r"(\d{4})[年\-/](\d{1,2})[月\-/](\d{1,2})", s)
     if m:
         return m.group(1) + "-" + m.group(2).zfill(2) + "-" + m.group(3).zfill(2)
@@ -67,16 +65,6 @@ def get_conclusion(atype):
         return {"checked": [True, False, False, False, False, False],
                 "fields": ["通过，可发证", "不通过", "通过，可换发证书", "不符合发证条件", "通过，不换证", "通过，可换发新的认证证书"]}
 
-def get_text_from_run(run):
-    return run.text or ""
-
-def get_cell_text(cell):
-    texts = []
-    for para in cell.paragraphs:
-        for run in para.runs:
-            texts.append(get_text_from_run(run))
-    return "".join(texts)
-
 def fill_report(doc, fields):
     company = fields.get("company", "")
     taskNo = fields.get("taskNo", "")
@@ -86,79 +74,77 @@ def fill_report(doc, fields):
     scope = fields.get("scope", "")
     date = fields.get("date", "")
 
-    filled = {"company": False, "taskNo": False, "leader": False, "address": False, "scope": False}
+    filled_keys = set()
 
-    def fill_field(target_texts, value, filled_key):
-        if not value or filled[filled_key]:
+    def append_to_next_run(target_texts, value, key):
+        """在目标文本后的下一个run追加value，只填一次"""
+        if not value or key in filled_keys:
             return
-        # Search paragraphs
+        # 搜索段落
         for para in doc.paragraphs:
             runs = list(para.runs)
-            full_text = "".join(r.text or "" for r in runs)
-            if any(t in full_text for t in target_texts):
-                for i, run in enumerate(runs):
-                    if run.text and any(t in run.text for t in target_texts):
-                        if i + 1 < len(runs):
-                            runs[i + 1].text = (runs[i + 1].text or "") + value
-                        else:
-                            run.text = run.text + value
-                        filled[filled_key] = True
-                        return
-        # Search table cells
+            for i, run in enumerate(runs):
+                if run.text and any(t in run.text for t in target_texts):
+                    if i + 1 < len(runs):
+                        runs[i + 1].text = (runs[i + 1].text or "") + value
+                    else:
+                        run.text = run.text + value
+                    filled_keys.add(key)
+                    return
+        # 搜索表格
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
-                    cell_text = get_cell_text(cell)
-                    if any(t in cell_text for t in target_texts):
-                        for para in cell.paragraphs:
-                            runs = list(para.runs)
-                            for i, run in enumerate(runs):
-                                if run.text and any(t in run.text for t in target_texts):
-                                    if i + 1 < len(runs):
-                                        runs[i + 1].text = (runs[i + 1].text or "") + value
-                                    else:
-                                        run.text = run.text + value
-                                    filled[filled_key] = True
-                                    return
+                    for para in cell.paragraphs:
+                        runs = list(para.runs)
+                        for i, run in enumerate(runs):
+                            if run.text and any(t in run.text for t in target_texts):
+                                if i + 1 < len(runs):
+                                    runs[i + 1].text = (runs[i + 1].text or "") + value
+                                else:
+                                    run.text = run.text + value
+                                filled_keys.add(key)
+                                return
 
-    fill_field(["公司名称"], company, "company")
-    fill_field(["任务号", "任务编号"], taskNo, "taskNo")
-    fill_field(["审核组长"], leader, "leader")
-    fill_field(["审核地址"], address, "address")
-    fill_field(["认证范围"], scope, "scope")
-
-    # 审核类型勾选 - 只在模板文本中替换 checkbox
-    if auditType:
+    def fill_cb_in_exact_run(target_text, checked=True):
+        """只替换包含完整target_text的run中的checkbox，不匹配部分文本"""
+        fill = CHK_FILLED if checked else CHK_EMPTY
+        # 搜索段落
         for para in doc.paragraphs:
             for run in para.runs:
-                if run.text:
-                    if "初审" in run.text:
-                        run.text = run.text.replace(CHK_EMPTY, CHK_FILLED)
-                    if "监" in run.text and "审" in run.text:
-                        run.text = run.text.replace(CHK_EMPTY, CHK_FILLED)
-                    if "再认证" in run.text:
-                        run.text = run.text.replace(CHK_EMPTY, CHK_FILLED)
-                    if "转移" in run.text:
-                        run.text = run.text.replace(CHK_EMPTY, CHK_FILLED)
-                    if "特殊" in run.text:
-                        run.text = run.text.replace(CHK_EMPTY, CHK_FILLED)
+                if run.text and run.text.strip() == target_text:
+                    run.text = run.text.replace(CHK_EMPTY, fill)
+                    return
+        # 搜索表格
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
                     for para in cell.paragraphs:
                         for run in para.runs:
-                            if run.text:
-                                if "初审" in run.text:
-                                    run.text = run.text.replace(CHK_EMPTY, CHK_FILLED)
-                                if "监" in run.text and "审" in run.text:
-                                    run.text = run.text.replace(CHK_EMPTY, CHK_FILLED)
-                                if "再认证" in run.text:
-                                    run.text = run.text.replace(CHK_EMPTY, CHK_FILLED)
-                                if "转移" in run.text:
-                                    run.text = run.text.replace(CHK_EMPTY, CHK_FILLED)
-                                if "特殊" in run.text:
-                                    run.text = run.text.replace(CHK_EMPTY, CHK_FILLED)
+                            if run.text and run.text.strip() == target_text:
+                                run.text = run.text.replace(CHK_EMPTY, fill)
+                                return
 
+    # 填充文本字段
+    append_to_next_run(["公司名称"], company, "company")
+    append_to_next_run(["任务号", "任务编号"], taskNo, "taskNo")
+    append_to_next_run(["审核组长"], leader, "leader")
+    append_to_next_run(["审核地址"], address, "address")
+    append_to_next_run(["认证范围"], scope, "scope")
+
+    # 审核类型勾选 - 只勾选匹配的精确项
+    if auditType:
+        atype_clean = auditType.strip()
+        if "一阶段" in atype_clean or "二阶段" in atype_clean or "再认证" in atype_clean:
+            fill_cb_in_exact_run("初审", True)
+        elif "转移" in atype_clean:
+            fill_cb_in_exact_run("转移", True)
+        elif "监" in atype_clean:
+            fill_cb_in_exact_run("监审", True)
+        elif "特殊" in atype_clean:
+            fill_cb_in_exact_run("特殊", True)
+
+    # 结论勾选
     con = get_conclusion(auditType)
     for name, chk in zip(con["fields"], con["checked"]):
         fill_cb(doc, name, chk)
@@ -270,7 +256,7 @@ def count_rows(ws, fmt="A"):
                 break
     return c
 
-# Session state init
+# Session state
 for key, default in [
     ("mode", "single"), ("batch_step", 0), ("batch_total", 0),
     ("batch_files", []), ("batch_processed", 0),
@@ -421,4 +407,4 @@ else:
         st.warning("Please upload both Excel and template")
 
 st.markdown("---")
-st.caption("Cert Report Generator v2.1")
+st.caption("Cert Report Generator v2.2")
