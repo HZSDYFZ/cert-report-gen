@@ -207,7 +207,8 @@ def read_row(ws, row, fmt):
 
 def count_rows(ws):
     c = 0
-    for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
+    max_r = min(ws.max_row, 10000)
+    for row in ws.iter_rows(min_row=2, max_row=max_r):
         vals = [cv.value for cv in row]
         if vals and vals[3]:
             c += 1
@@ -268,8 +269,9 @@ if mode == 'Single Report':
                     doc.save(out)
                     out.seek(0)
                     st.success('Report generated!')
+                    fname = str(f.get('company', 'report')) + '.docx'
                     st.download_button(label='Download Report', data=out.getvalue(),
-                                       file_name=str(f.get('company', 'report')) + '.docx',
+                                       file_name=fname,
                                        mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
                 except Exception as e:
                     st.error('Generation failed: ' + str(e))
@@ -339,8 +341,9 @@ else:
                     zb.seek(0)
                     st.session_state.curr_zip = zb.getvalue()
                     st.success('Generated ' + str(len(new)) + ' reports (total: ' + str(st.session_state.batch_processed) + '/' + str(total) + ')')
+                    fname = 'reports_batch_' + str(step + 1) + '.zip'
                     st.download_button(label='Download Batch (ZIP)', data=st.session_state.curr_zip,
-                                       file_name='reports_batch_' + str(step + 1) + '.zip',
+                                       file_name=fname,
                                        mime='application/zip')
                     if st.session_state.batch_processed >= total:
                         st.success('All reports generated!')
