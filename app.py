@@ -4,8 +4,6 @@ from datetime import datetime
 import streamlit as st
 import openpyxl
 from docx import Document
-from docx.oxml.ns import qn
-from docx.oxml import OxmlElement
 
 CHK_EMPTY = chr(0x25A1)
 CHK_FILLED = chr(0x25A0)
@@ -70,20 +68,6 @@ def replace_in_run(run, text, value):
     else:
         run.text = run.text.replace(text, value)
 
-def fill_text_after_label(para, label, value):
-    full_text = ''.join(run.text or '' for run in para.runs)
-    if label in full_text:
-        parts = full_text.split(label)
-        if len(parts) >= 2:
-            suffix = parts[1]
-            suffix = re.sub(r'^[:：\s]*', '', suffix)
-            new_text = parts[0] + label + value + suffix
-            for i, run in enumerate(para.runs):
-                if i == 0:
-                    run.text = new_text
-                else:
-                    run.text = ''
-
 def fill_report(doc, fields):
     company = fields.get('company', '')
     taskNo = fields.get('taskNo', '')
@@ -95,73 +79,83 @@ def fill_report(doc, fields):
     
     for para in doc.paragraphs:
         full_text = ''.join(run.text or '' for run in para.runs)
-        if '公司名称' in full_text or '公司' in full_text:
+        if '公司名称' in full_text and company:
             for run in para.runs:
-                if '公司名称' in run.text:
+                if run.text and '公司名称' in run.text:
                     idx = run.text.find('公司名称')
                     run.text = run.text[:idx+4] + company + run.text[idx+4:]
                     break
-                elif '公司' in run.text and idx == -1:
-                    pass
-        if '任务号' in full_text or '任务编号' in full_text:
+        if ('任务号' in full_text or '任务编号' in full_text) and taskNo:
             for run in para.runs:
-                if '任务号' in run.text or '任务编号' in run.text:
+                if run.text:
                     for label in ['任务编号', '任务号']:
                         if label in run.text:
                             idx = run.text.find(label)
                             run.text = run.text[:idx+len(label)] + taskNo + run.text[idx+len(label):]
                             break
-                    break
-        if '审核组长' in full_text:
+        if '审核组长' in full_text and leader:
             for run in para.runs:
-                if '审核组长' in run.text:
+                if run.text and '审核组长' in run.text:
                     idx = run.text.find('审核组长')
                     run.text = run.text[:idx+4] + leader + run.text[idx+4:]
                     break
-        if '审核地址' in full_text:
+        if '审核地址' in full_text and address:
             for run in para.runs:
-                if '审核地址' in run.text:
+                if run.text and '审核地址' in run.text:
                     idx = run.text.find('审核地址')
                     run.text = run.text[:idx+4] + address + run.text[idx+4:]
                     break
-        if '认证范围' in full_text or '审核范围' in full_text:
+        if ('认证范围' in full_text or '审核范围' in full_text) and scope:
             for run in para.runs:
-                if '认证范围' in run.text:
-                    idx = run.text.find('认证范围')
-                    run.text = run.text[:idx+4] + scope + run.text[idx+4:]
-                    break
-                elif '审核范围' in run.text:
-                    idx = run.text.find('审核范围')
-                    run.text = run.text[:idx+4] + scope + run.text[idx+4:]
-                    break
+                if run.text:
+                    if '认证范围' in run.text:
+                        idx = run.text.find('认证范围')
+                        run.text = run.text[:idx+4] + scope + run.text[idx+4:]
+                        break
+                    elif '审核范围' in run.text:
+                        idx = run.text.find('审核范围')
+                        run.text = run.text[:idx+4] + scope + run.text[idx+4:]
+                        break
     
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 full_text = ''.join(para.text for para in cell.paragraphs)
-                if '公司名称' in full_text and not company:
-                    pass
-                for para in cell.paragraphs:
-                    for run in para.runs:
-                        if run.text:
-                            if '公司名称' in run.text and company:
+                if '公司名称' in full_text and company:
+                    for para in cell.paragraphs:
+                        for run in para.runs:
+                            if run.text and '公司名称' in run.text:
                                 idx = run.text.find('公司名称')
                                 run.text = run.text[:idx+4] + company + run.text[idx+4:]
-                            elif '任务号' in run.text and taskNo:
-                                for label in ['任务编号', '任务号']:
-                                    if label in run.text:
-                                        idx = run.text.find(label)
-                                        run.text = run.text[:idx+len(label)] + taskNo + run.text[idx+len(label):]
-                                        break
-                            elif '审核组长' in run.text and leader:
+                                break
+                if '任务号' in full_text and taskNo:
+                    for para in cell.paragraphs:
+                        for run in para.runs:
+                            if run.text and '任务号' in run.text:
+                                idx = run.text.find('任务号')
+                                run.text = run.text[:idx+3] + taskNo + run.text[idx+3:]
+                                break
+                if '审核组长' in full_text and leader:
+                    for para in cell.paragraphs:
+                        for run in para.runs:
+                            if run.text and '审核组长' in run.text:
                                 idx = run.text.find('审核组长')
                                 run.text = run.text[:idx+4] + leader + run.text[idx+4:]
-                            elif '审核地址' in run.text and address:
+                                break
+                if '审核地址' in full_text and address:
+                    for para in cell.paragraphs:
+                        for run in para.runs:
+                            if run.text and '审核地址' in run.text:
                                 idx = run.text.find('审核地址')
                                 run.text = run.text[:idx+4] + address + run.text[idx+4:]
-                            elif '认证范围' in run.text and scope:
+                                break
+                if '认证范围' in full_text and scope:
+                    for para in cell.paragraphs:
+                        for run in para.runs:
+                            if run.text and '认证范围' in run.text:
                                 idx = run.text.find('认证范围')
                                 run.text = run.text[:idx+4] + scope + run.text[idx+4:]
+                                break
     
     con = get_conclusion(auditType)
     for name, chk in zip(con['fields'], con['checked']):
@@ -261,11 +255,13 @@ def read_row(ws, row, fmt):
 
 def count_rows(ws):
     c = 0
-    max_r = min(ws.max_row, 10000)
-    for row in ws.iter_rows(min_row=2, max_row=max_r):
+    for row in ws.iter_rows(min_row=2):
         vals = [cv.value for cv in row]
         if vals and vals[3]:
             c += 1
+        elif vals and not any(v for v in vals):
+            if c > 0:
+                break
     return c
 
 st.title('Cert Report Generator')
