@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import io, re, zipfile
 from datetime import datetime
 import streamlit as st
@@ -207,8 +207,9 @@ def read_row(ws, row, fmt):
 
 def count_rows(ws):
     c = 0
-    for row in ws.iter_rows(min_row=2):
-        if any(cv.value for cv in row):
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
+        vals = [cv.value for cv in row]
+        if vals and vals[3]:
             c += 1
     return c
 
@@ -283,20 +284,24 @@ else:
         tf = st.file_uploader('Upload Template', type=['docx'], key='b_tpl_up')
     if ef and tf:
         if st.session_state.expl is None or st.session_state.get('exc_name') != ef.name or st.session_state.get('b_tpl_name') != tf.name:
-            wb = openpyxl.load_workbook(ef, data_only=True)
-            ws = wb.active
-            fmt = detect_format(wb)
-            total = count_rows(ws)
-            st.session_state.expl = wb
-            st.session_state.ws = ws
-            st.session_state.excel_fmt = fmt
-            st.session_state.batch_total = total
-            st.session_state.batch_processed = 0
-            st.session_state.batch_step = 0
-            st.session_state.batch_files = []
-            st.session_state.expl_name = ef.name
-            st.session_state.b_tpl_name = tf.name
-            st.session_state.b_tpl_bytes = tf.read()
+            try:
+                wb = openpyxl.load_workbook(ef, data_only=True)
+                ws = wb.active
+                fmt = detect_format(wb)
+                total = count_rows(ws)
+                st.session_state.expl = wb
+                st.session_state.ws = ws
+                st.session_state.excel_fmt = fmt
+                st.session_state.batch_total = total
+                st.session_state.batch_processed = 0
+                st.session_state.batch_step = 0
+                st.session_state.batch_files = []
+                st.session_state.expl_name = ef.name
+                st.session_state.b_tpl_name = tf.name
+                st.session_state.b_tpl_bytes = tf.read()
+            except Exception as e:
+                st.error('Failed to load Excel: ' + str(e))
+                st.stop()
         fmt = st.session_state.excel_fmt
         total = st.session_state.batch_total
         processed = st.session_state.batch_processed
@@ -353,7 +358,7 @@ else:
             st.session_state.batch_processed = 0
             st.session_state.batch_files = []
             st.session_state.expl = None
-            st.experimental_rerun()
+            st.rerun()
     elif ef or tf:
         st.warning('Please upload both Excel and template')
 
