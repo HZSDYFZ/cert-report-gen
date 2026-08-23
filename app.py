@@ -37,6 +37,11 @@ def format_date(val):
     if isinstance(val, datetime):
         return val.strftime('%Y-%m-%d')
     s = str(val).strip()
+    # Handle MM/DD/YYYY format
+    m = re.search(r'(\d{1,2})/(\d{1,2})/(\d{4})', s)
+    if m:
+        return m.group(3) + '-' + m.group(1).zfill(2) + '-' + m.group(2).zfill(2)
+    # Handle Chinese format
     m = re.search(r'(\d{4})[年\-/](\d{1,2})[月\-/](\d{1,2})', s)
     if m:
         return m.group(1) + '-' + m.group(2).zfill(2) + '-' + m.group(3).zfill(2)
@@ -69,19 +74,18 @@ def fill_report(doc, fields):
     auditType = fields.get('auditType', '')
     address = fields.get('address', '')
     scope = fields.get('scope', '')
+    date = fields.get('date', datetime.now().strftime('%Y-%m-%d'))
     
-    # 只处理段落，不处理表格
+    # 填充文本
     filled = {'company': False, 'taskNo': False, 'leader': False, 'address': False, 'scope': False}
     
     for para in doc.paragraphs:
         runs = list(para.runs)
         full_text = ''.join(r.text or '' for r in runs)
         
-        # 公司名称：找 "公司名称"，在它后面的 ": " 或 ":" 后面填值
         if company and not filled['company'] and '公司名称' in full_text:
             for i, run in enumerate(runs):
                 if run.text and '公司名称' in run.text:
-                    # 在下一个run或当前run后面填充
                     if i + 1 < len(runs):
                         runs[i + 1].text = (runs[i + 1].text or '') + company
                     else:
@@ -89,7 +93,6 @@ def fill_report(doc, fields):
                     filled['company'] = True
                     break
         
-        # 任务号：找 "任务号" 或 "任务编号"
         if taskNo and not filled['taskNo'] and ('任务号' in full_text or '任务编号' in full_text):
             for i, run in enumerate(runs):
                 if run.text and ('任务号' in run.text or '任务编号' in run.text):
@@ -100,7 +103,6 @@ def fill_report(doc, fields):
                     filled['taskNo'] = True
                     break
         
-        # 审核组长：找 "审核组长"
         if leader and not filled['leader'] and '审核组长' in full_text:
             for i, run in enumerate(runs):
                 if run.text and '审核组长' in run.text:
@@ -111,7 +113,6 @@ def fill_report(doc, fields):
                     filled['leader'] = True
                     break
         
-        # 审核地址：找 "审核地址"
         if address and not filled['address'] and '审核地址' in full_text:
             for i, run in enumerate(runs):
                 if run.text and '审核地址' in run.text:
@@ -122,7 +123,6 @@ def fill_report(doc, fields):
                     filled['address'] = True
                     break
         
-        # 认证范围：找 "认证范围"
         if scope and not filled['scope'] and '认证范围' in full_text:
             for i, run in enumerate(runs):
                 if run.text and '认证范围' in run.text:
@@ -133,9 +133,62 @@ def fill_report(doc, fields):
                     filled['scope'] = True
                     break
     
+    # 处理审核类型勾选
+    if auditType:
+        # 清除所有审核类型的勾选
+        for para in doc.paragraphs:
+            for run in para.runs:
+                if run.text:
+                    if '初审' in run.text:
+                        run.text = run.text.replace(CHK_FILLED, CHK_EMPTY)
+                    if '监' in run.text and '审' in run.text:
+                        # 只处理"监"或"审"，不处理其他
+                        pass
+                    if '再认证' in run.text:
+                        run.text = run.text.replace(CHK_FILLED, CHK_EMPTY)
+                    if '特殊' in run.text:
+                        run.text = run.text.replace(CHK_FILLED, CHK_EMPTY)
+        
+        # 根据审核类型勾选
+        if '一阶段' in auditType or '二阶段' in auditType or '初审' in auditType:
+            for para in doc.paragraphs:
+                for run in para.runs:
+                    if run.text and '初审' in run.text:
+                        run.text = run.text.replace(CHK_EMPTY, CHK_FILLED)
+                        break
+        if '监' in auditType:
+            for para in doc.paragraphs:
+                for run in para.runs:
+                    if run.text and '监' in run.text:
+                        run.text = run.text.replace(CHK_EMPTY, CHK_FILLED)
+                        break
+                    if run.text and '审' in run.text and '初审' not in run.text and '再认证' not in run.text:
+                        run.text = run.text.replace(CHK_EMPTY, CHK_FILLED)
+                        break
+        if '再认证' in auditType:
+            for para in doc.paragraphs:
+                for run in para.runs:
+                    if run.text and '再认证' in run.text:
+                        run.text = run.text.replace(CHK_EMPTY, CHK_FILLED)
+                        break
+        if '转移' in auditType:
+            for para in doc.paragraphs:
+                for run in para.runs:
+                    if run.text and '转移' in run.text:
+                        run.text = run.text.replace(CHK_EMPTY, CHK_FILLED)
+                        break
+        if '特殊' in auditType:
+            for para in doc.paragraphs:
+                for run in para.runs:
+                    if run.text and '特殊' in run.text:
+                        run.text = run.text.replace(CHK_EMPTY, CHK_FILLED)
+                        break
+    
+    # 处理结论勾选
     con = get_conclusion(auditType)
     for name, chk in zip(con['fields'], con['checked']):
         fill_cb(doc, name, chk)
+    
     return doc
 
 def extract_form_fields(doc):
@@ -219,21 +272,23 @@ def read_row(ws, row, fmt):
             'taskNo': str(vals[14]).strip() if vals[14] else '',
         }
     else:
+        # Format B: 12 columns (A-L)
+        # A=序号, B=审核类型, C=空, D=审核类型, E=审核类型, F=审核类型, G=地址, H=范围, I=任务号, J=任务号, K=结论, L=日期
         return {
-            'company': str(vals[2]).strip() if vals[2] else '',
-            'leader': str(vals[3]).split('+')[0].strip() if vals[3] else '',
-            'auditType': str(vals[4]).strip() if vals[4] else '',
-            'address': str(vals[6]).strip() if vals[6] else '',
-            'scope': str(vals[7]).strip() if vals[7] else '',
-            'taskNo': str(vals[8]).strip() if vals[8] else '',
-            'date': format_date(vals[11]) if vals[11] else '',
+            'company': str(vals[0]).strip() if vals[0] else '',  # A列
+            'leader': str(vals[1]).strip() if vals[1] else '',   # B列
+            'auditType': str(vals[2]).strip() if vals[2] else '',  # C列 (但C是空的)
+            'address': str(vals[5]).strip() if len(vals) > 5 and vals[5] else '',  # G列
+            'scope': str(vals[6]).strip() if len(vals) > 6 and vals[6] else '',  # H列
+            'taskNo': str(vals[7]).strip() if len(vals) > 7 and vals[7] else '',  # I列
+            'date': str(vals[11]).strip() if len(vals) > 11 and vals[11] else '',  # L列
         }
 
 def count_rows(ws):
     c = 0
     for row in ws.iter_rows(min_row=2):
         vals = [cv.value for cv in row]
-        if vals and vals[3]:
+        if vals and vals[0]:
             c += 1
         elif vals and not any(v for v in vals):
             if c > 0:
