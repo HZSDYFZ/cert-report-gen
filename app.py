@@ -4,6 +4,7 @@ from datetime import datetime
 import streamlit as st
 import openpyxl
 from docx import Document
+from docx.shared import Pt
 
 CHK_EMPTY = chr(0x25A1)
 CHK_FILLED = chr(0x25A0)
@@ -62,57 +63,42 @@ def get_conclusion(atype):
         return {'checked': [True, False, False, False, False, False],
                 'fields': ['通过，可发证', '不通过', '通过，可换发证书', '不符合发证条件', '通过，不换证', '通过，可换发新的认证证书']}
 
-def fill_report(doc, fields):
+def replace_placeholders(doc, fields):
     reps = {
-        '{{company}}': fields.get('company', ''),
-        '{{taskNo}}': fields.get('taskNo', ''),
-        '{{leader}}': fields.get('leader', ''),
-        '{{auditType}}': fields.get('auditType', ''),
-        '{{address}}': fields.get('address', ''),
-        '{{scope}}': fields.get('scope', ''),
-        '{{date}}': fields.get('date', datetime.now().strftime('%Y-%m-%d')),
+        'company': fields.get('company', ''),
+        'taskNo': fields.get('taskNo', ''),
+        'leader': fields.get('leader', ''),
+        'auditType': fields.get('auditType', ''),
+        'address': fields.get('address', ''),
+        'scope': fields.get('scope', ''),
+        'date': fields.get('date', datetime.now().strftime('%Y-%m-%d')),
     }
     for para in doc.paragraphs:
-        for run in para.runs:
-            for k, v in reps.items():
-                if k in run.text:
-                    run.text = run.text.replace(k, v)
+        full_text = ''.join(run.text or '' for run in para.runs)
+        for key, val in reps.items():
+            placeholder = '{{' + key + '}}'
+            if placeholder in full_text:
+                for run in para.runs:
+                    run.text = run.text.replace(placeholder, val)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
+                full_text = ''
                 for para in cell.paragraphs:
-                    for run in para.runs:
-                        for k, v in reps.items():
-                            if k in run.text:
-                                run.text = run.text.replace(k, v)
+                    full_text += ''.join(run.text or '' for run in para.runs)
+                for key, val in reps.items():
+                    placeholder = '{{' + key + '}}'
+                    if placeholder in full_text:
+                        for para in cell.paragraphs:
+                            for run in para.runs:
+                                run.text = run.text.replace(placeholder, val)
+
+def fill_report(doc, fields):
+    replace_placeholders(doc, fields)
     con = get_conclusion(fields.get('auditType', ''))
     for name, chk in zip(con['fields'], con['checked']):
         fill_cb(doc, name, chk)
     return doc
-
-def gen_docx(tpl_bytes, fields):
-    buf = io.BytesIO(tpl_bytes)
-    with zipfile.ZipFile(buf, 'r') as zf:
-        xml = zf.read('word/document.xml').decode('utf-8')
-        reps = {
-            '{{company}}': fields.get('company', ''),
-            '{{taskNo}}': fields.get('taskNo', ''),
-            '{{leader}}': fields.get('leader', ''),
-            '{{auditType}}': fields.get('auditType', ''),
-            '{{address}}': fields.get('address', ''),
-            '{{scope}}': fields.get('scope', ''),
-            '{{date}}': fields.get('date', datetime.now().strftime('%Y-%m-%d')),
-        }
-        for k, v in reps.items():
-            xml = xml.replace(k, v)
-        out = io.BytesIO()
-        with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as oz:
-            for name in zf.namelist():
-                if name == 'word/document.xml':
-                    oz.writestr(name, xml.encode('utf-8'))
-                else:
-                    oz.writestr(name, zf.read(name))
-        return out.getvalue()
 
 def extract_form_fields(doc):
     fields = {}
@@ -326,8 +312,11 @@ else:
                     if not f.get('company'):
                         continue
                     try:
-                        b = gen_docx(st.session_state.b_tpl_bytes, f)
-                        new.append((f['company'], b))
+                        doc = Document(io.BytesIO(st.session_state.b_tpl_bytes))
+                        doc = fill_report(doc, f)
+                        out = io.BytesIO()
+                        doc.save(out)
+                        new.append((f['company'], out.getvalue()))
                     except Exception as e:
                         st.error(str(f['company']) + ' failed: ' + str(e))
                 if new:
