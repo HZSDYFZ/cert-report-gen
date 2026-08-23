@@ -212,7 +212,7 @@ def count_rows(ws):
             c += 1
     return c
 
-st.set_page_config(page_title='Cert Report Generator', page_icon=':clipboard:', layout='wide')
+st.set_page_config(page_title='Cert Report Generator', layout='wide')
 st.title('Cert Report Generator')
 
 if 'mode' not in st.session_state:
