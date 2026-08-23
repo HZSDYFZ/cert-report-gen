@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import io, re, zipfile
 from datetime import datetime
 import streamlit as st
@@ -215,30 +215,8 @@ def count_rows(ws):
 st.set_page_config(page_title='Cert Report Generator', layout='wide')
 st.title('Cert Report Generator')
 
-if 'mode' not in st.session_state:
-    st.session_state.mode = 'single'
-if 'batch_step' not in st.session_state:
-    st.session_state.batch_step = 0
-if 'batch_total' not in st.session_state:
-    st.session_state.batch_total = 0
-if 'batch_files' not in st.session_state:
-    st.session_state.batch_files = []
-if 'batch_processed' not in st.session_state:
-    st.session_state.batch_processed = 0
-if 'single_fields' not in st.session_state:
-    st.session_state.single_fields = {}
-if 'form_doc' not in st.session_state:
-    st.session_state.form_doc = None
-if 'tpl_bytes' not in st.session_state:
-    st.session_state.tpl_bytes = None
-if 'expl' not in st.session_state:
-    st.session_state.expl = None
-if 'ws' not in st.session_state:
-    st.session_state.ws = None
-if 'excel_fmt' not in st.session_state:
-    st.session_state.excel_fmt = None
-
-mode = st.radio('Select Mode', ['Single Report', 'Batch Generation'], key='mode')
+# 模式选择
+mode = st.radio('Select Mode', ['Single Report', 'Batch Generation'], key='mode_choice')
 
 if mode == 'Single Report':
     st.header('Single Report')
@@ -249,32 +227,35 @@ if mode == 'Single Report':
     with c2:
         st.subheader('Step 2: Upload Template')
         tf = st.file_uploader('Upload Template', type=['docx'], key='tpl_up')
+
     if ff and tf:
-        if st.session_state.form_doc is None or st.session_state.get('form_name') != ff.name:
-            st.session_state.form_doc = ff.read()
-            st.session_state.form_name = ff.name
-            st.session_state.single_fields = extract_form_fields(Document(io.BytesIO(st.session_state.form_doc)))
-        if st.session_state.tpl_bytes is None or st.session_state.get('tpl_name') != tf.name:
-            st.session_state.tpl_bytes = tf.read()
-            st.session_state.tpl_name = tf.name
-        f = st.session_state.single_fields
-        st.info('Extracted: company=' + str(f.get('company', '')) + ', taskNo=' + str(f.get('taskNo', '')) + ', leader=' + str(f.get('leader', '')))
-        if st.button('Generate Report', type='primary', key='gen_s'):
-            with st.spinner('Generating...'):
-                try:
-                    doc = Document(io.BytesIO(st.session_state.tpl_bytes))
-                    doc = fill_report(doc, f)
+        try:
+            form_bytes = ff.getvalue()
+            tpl_bytes = tf.getvalue()
+            
+            single_fields = extract_form_fields(Document(io.BytesIO(form_bytes)))
+            
+            st.info(f"Extracted: company={single_fields.get('company', '')}, taskNo={single_fields.get('taskNo', '')}, leader={single_fields.get('leader', '')}")
+            
+            if st.button('Generate Report', type='primary', key='gen_s'):
+                with st.spinner('Generating...'):
+                    doc = Document(io.BytesIO(tpl_bytes))
+                    doc = fill_report(doc, single_fields)
                     out = io.BytesIO()
                     doc.save(out)
                     out.seek(0)
                     st.success('Report generated!')
-                    st.download_button(label='Download Report', data=out.getvalue(),
-                                       file_name=str(f.get('company', 'report')) + '.docx',
-                                       mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
-                except Exception as e:
-                    st.error('Generation failed: ' + str(e))
+                    st.download_button(
+                        label='Download Report',
+                        data=out.getvalue(),
+                        file_name=f"{single_fields.get('company', 'report')}.docx",
+                        mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+                    )
+        except Exception as e:
+            st.error(f"Processing failed: {str(e)}")
     elif ff or tf:
         st.warning('Please upload both FORM6101 and template')
+
 else:
     st.header('Batch Generation')
     c1, c2 = st.columns(2)
@@ -282,79 +263,49 @@ else:
         ef = st.file_uploader('Upload Excel', type=['xlsx'], key='exc_up')
     with c2:
         tf = st.file_uploader('Upload Template', type=['docx'], key='b_tpl_up')
+
     if ef and tf:
-        if st.session_state.expl is None or st.session_state.get('exc_name') != ef.name or st.session_state.get('b_tpl_name') != tf.name:
-            wb = openpyxl.load_workbook(ef, data_only=True)
+        try:
+            excel_bytes = ef.getvalue()
+            b_tpl_bytes = tf.getvalue()
+            
+            wb = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True)
             ws = wb.active
             fmt = detect_format(wb)
             total = count_rows(ws)
-            st.session_state.expl = wb
-            st.session_state.ws = ws
-            st.session_state.excel_fmt = fmt
-            st.session_state.batch_total = total
-            st.session_state.batch_processed = 0
-            st.session_state.batch_step = 0
-            st.session_state.batch_files = []
-            st.session_state.expl_name = ef.name
-            st.session_state.b_tpl_name = tf.name
-            st.session_state.b_tpl_bytes = tf.read()
-        fmt = st.session_state.excel_fmt
-        total = st.session_state.batch_total
-        processed = st.session_state.batch_processed
-        fmt_label = 'Format A (15 cols)' if fmt == 'A' else 'Format B (12 cols)'
-        st.info('Excel format: ' + fmt_label + ', total rows: ' + str(total))
-        prog = min((processed + 20) / max(total, 1), 1.0) if total > 0 else 0
-        st.progress(prog)
-        st.write('Progress: ' + str(processed) + '/' + str(total))
-        if st.button('Start Generation (20 at a time)', key='b_start'):
-            with st.spinner('Generating...'):
-                ws = st.session_state.ws
-                fmt = st.session_state.excel_fmt
-                step = st.session_state.batch_step
-                start = 2 + step * 20
-                end = min(start + 20, total + 1)
-                new = []
-                for ri in range(start, end):
-                    row = list(ws.iter_rows(min_row=ri, max_row=ri))[0]
-                    f = read_row(ws, row, fmt)
-                    if not f.get('company'):
-                        continue
-                    try:
-                        b = gen_docx(st.session_state.b_tpl_bytes, f)
-                        new.append((f['company'], b))
-                    except Exception as e:
-                        st.error(str(f['company']) + ' failed: ' + str(e))
-                if new:
-                    st.session_state.batch_files.extend(new)
-                    st.session_state.batch_step += 1
-                    st.session_state.batch_processed = min(step * 20 + len(new), total)
-                    zb = io.BytesIO()
-                    with zipfile.ZipFile(zb, 'w', zipfile.ZIP_DEFLATED) as zf:
-                        for n, d in new:
-                            zf.writestr(n + '.docx', d)
-                    zb.seek(0)
-                    st.session_state.curr_zip = zb.getvalue()
-                    st.success('Generated ' + str(len(new)) + ' reports (total: ' + str(st.session_state.batch_processed) + '/' + str(total) + ')')
-                    st.download_button(label='Download Batch (ZIP)', data=st.session_state.curr_zip,
-                                       file_name='reports_batch_' + str(step + 1) + '.zip',
-                                       mime='application/zip')
-                    if st.session_state.batch_processed >= total:
-                        st.success('All reports generated!')
-                        if len(st.session_state.batch_files) > 1:
-                            azb = io.BytesIO()
-                            with zipfile.ZipFile(azb, 'w', zipfile.ZIP_DEFLATED) as zf:
-                                for n, d in st.session_state.batch_files:
-                                    zf.writestr(n + '.docx', d)
-                            azb.seek(0)
-                            st.download_button(label='Download All (ZIP)', data=azb.getvalue(),
-                                               file_name='all_reports.zip',
-                                               mime='application/zip')
-        if st.button('Clear and Restart', key='b_clear'):
-            st.session_state.batch_step = 0
-            st.session_state.batch_processed = 0
-            st.session_state.batch_files = []
-            st.session_state.expl = None
-            st.experimental_rerun()
+            fmt_label = 'Format A (15 cols)' if fmt == 'A' else 'Format B (12 cols)'
+            
+            st.info(f"Excel format: {fmt_label}, total rows: {total}")
+            
+            if st.button('Start Generation (All Reports)', type='primary', key='b_start'):
+                with st.spinner('Generating all reports...'):
+                    progress_bar = st.progress(0)
+                    azb = io.BytesIO()
+                    
+                    with zipfile.ZipFile(azb, 'w', zipfile.ZIP_DEFLATED) as zf:
+                        processed_count = 0
+                        for ri in range(2, total + 2):
+                            row = list(ws.iter_rows(min_row=ri, max_row=ri))[0]
+                            f = read_row(ws, row, fmt)
+                            if not f.get('company'):
+                                continue
+                            
+                            doc_bytes = gen_docx(b_tpl_bytes, f)
+                            zf.writestr(f"{f['company']}.docx", doc_bytes)
+                            
+                            processed_count += 1
+                            progress_bar.progress(min(processed_count / max(total, 1), 1.0))
+                    
+                    azb.seek(0)
+                    st.success(f"Successfully generated {processed_count} reports!")
+                    st.download_button(
+                        label='Download All Reports (ZIP)',
+                        data=azb.getvalue(),
+                        file_name='all_reports.zip',
+                        mime='application/zip'
+                    )
+        except Exception as e:
+            st.error(f"Batch generation failed: {str(e)}")
     elif ef or tf:
         st.warning('Please upload both Excel and template')
 
