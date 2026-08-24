@@ -17,74 +17,87 @@ def format_date(val):
     if m: return m.group(3)+'-'+m.group(1).zfill(2)+'-'+m.group(2).zfill(2)
     return s[:10] if len(s) >= 10 else s
 
-def get_conclusion_idx(atype):
-    '''Return the FCB index (0-6) to check for the given audit type'''
-    atype = str(atype).strip() if atype else ''
-    is_surv = '监' in atype and '再认证' not in atype and '二阶段' not in atype and '一阶段' not in atype
-    if '一阶段' in atype or '二阶段' in atype or '再认证' in atype:
-        return 0   # FCB[66]: 通过，可发证
-    elif '转移' in atype:
-        return 2   # FCB[68]: 通过，可换发证书
-    elif is_surv:
-        if '换发' in atype:
-            return 5  # FCB[71]: 通过，可换发新的认证证书
-        else:
-            return 4  # FCB[70]: 通过，不换证
-    else:
-        return 0   # FCB[66]: 通过，可发证 (default for 初审/未识别)
-
-def is_audit_surv(atype):
-    return '监' in atype and '再认证' not in atype and '二阶段' not in atype and '一阶段' not in atype
-
 def set_fcb(doc_xml, pos, checked):
     '''Set FORMCHECKBOX at absolute position to checked/unchecked'''
     cs = max(0, pos - 300)
     chunk = doc_xml[cs:pos + 100]
     if checked:
-        # Check: replace w:checked w:val=\"0\"/> with w:checked/>
         if 'w:checked w:val=\"0\"' in chunk:
             new_chunk = chunk.replace('w:checked w:val=\"0\"/>', 'w:checked/>')
             return doc_xml[:cs] + new_chunk + doc_xml[pos + 100:]
-        # Already checked or no checked attr
         if 'w:checked' not in chunk:
             new_chunk = chunk.replace('FORMCHECKBOX', 'w:checked/>FORMCHECKBOX')
             return doc_xml[:cs] + new_chunk + doc_xml[pos + 100:]
     else:
-        # Uncheck: replace w:checked/> with w:checked w:val=\"0\"/>
         if 'w:checked/>' in chunk:
             new_chunk = chunk.replace('w:checked/>', 'w:checked w:val=\"0\"/>')
             return doc_xml[:cs] + new_chunk + doc_xml[pos + 100:]
     return doc_xml
 
-def fill_cert_standard(cell_text, atype):
-    at = atype.strip()
+def fill_cert_standard_by_task(cell_text, task_no):
+    """勾选规则：
+    - 包含 TS 且无 ER -> 仅勾选 IATF16949
+    - 包含 ER 且无 TS -> 仅勾选 ISO9001
+    - 同时包含 TS 和 ER -> 同时勾选 IATF16949 和 ISO9001
+    """
+    tn = str(task_no).upper()
+    has_ts = 'TS' in tn
+    has_er = 'ER' in tn
+    
     result = cell_text
-    if 'IATF16949' in cell_text and 'IATF' in at:
+    if has_ts and 'IATF16949' in cell_text:
         result = result.replace(CHK_EMPTY + ' IATF16949', CHK_FILLED + ' IATF16949')
-    if 'ISO9001' in cell_text and '9001' in at:
+        result = result.replace(CHK_EMPTY + 'IATF16949', CHK_FILLED + 'IATF16949')
+    if has_er and 'ISO9001' in cell_text:
         result = result.replace(CHK_EMPTY + ' ISO9001', CHK_FILLED + ' ISO9001')
-    if 'ISO14001' in cell_text and ('EMS' in at or '14001' in at):
-        result = result.replace(CHK_EMPTY + ' ISO14001', CHK_FILLED + ' ISO14001')
-    if 'ISO45001' in cell_text:
-        if 'OHS' in at or '45001' in at:
-            result = result.replace(CHK_EMPTY + 'ISO 45001', CHK_FILLED + 'ISO 45001')
-            if result == cell_text:
-                result = result.replace(CHK_EMPTY + 'ISO45001', CHK_FILLED + 'ISO45001')
+        result = result.replace(CHK_EMPTY + 'ISO9001', CHK_FILLED + 'ISO9001')
     return result
 
-def fill_audit_type(cell_text, atype):
-    at = atype.strip()
-    is_surv = is_audit_surv(at)
+def fill_audit_type_new(cell_text, atype):
+    """审核类型勾选逻辑:
+    - 包含 二阶段 -> 初审
+    - 包含 监一 或 监二 -> 监审
+    - 包含 再认证 或 转移 -> 再认证/转移
+    - 包含 特殊 -> 特殊审核
+    """
+    at = str(atype).strip()
     result = cell_text
-    if '一阶段' in at or '二阶段' in at or '再认证' in at:
+    if '二阶段' in at:
         result = result.replace(CHK_EMPTY + '初审', CHK_FILLED + '初审')
-    if is_surv:
+    if '监一' in at or '监二' in at:
         result = result.replace(CHK_EMPTY + '监审', CHK_FILLED + '监审')
     if '再认证' in at or '转移' in at:
         result = result.replace(CHK_EMPTY + '再认证/转移', CHK_FILLED + '再认证/转移')
     if '特殊' in at:
         result = result.replace(CHK_EMPTY + '特殊审核', CHK_FILLED + '特殊审核')
     return result
+
+def get_conclusion_idx_new(atype, decision):
+    """认证决定结论选项索引 (0 - 6):
+    0: 通过，可发证（适用于：初审、再认证）
+    1: 通过，暂停恢复审核，可发证
+    2: 通过，可换发证书（转机构）
+    3: 通过，同意扩大认证范围，可发证
+    4: 通过，不换证（适用于：至上次认证决定后，企业证书信息无变更的监督项目）
+    5: 通过，可换发新的认证证书（适用于：至上次认证决定后，企业证书信息有变更的监督项目）
+    6: 不予通过
+    """
+    at = str(atype).strip()
+    dec = str(decision).strip()
+    
+    is_surv = ('监一' in at or '监二' in at)
+    
+    if '二阶段' in at or '再认证' in at:
+        return 0
+    elif '转移' in at:
+        return 2
+    elif is_surv and '不换证' in dec:
+        return 4
+    elif is_surv and '换发' in dec:
+        return 5
+    elif '特殊' in at and '换发' in dec:
+        return 3  # 对应“同意扩大认证范围，可发证”/换发
+    return 0
 
 def fill_report(doc, fields):
     company = fields.get('company', '')
@@ -93,360 +106,122 @@ def fill_report(doc, fields):
     auditType = fields.get('auditType', '')
     address = fields.get('address', '')
     scope = fields.get('scope', '')
-    filled = {'company': False, 'taskNo': False, 'leader': False, 'address': False, 'scope': False}
+    date_val = fields.get('date', '')
+    decision = fields.get('decision', '')
 
-    # Process paragraphs
-    for para in doc.paragraphs:
-        runs = list(para.runs)
-        full_text = ''.join(r.text or '' for r in runs)
-        if company and not filled['company'] and '公司名称' in full_text:
-            for i, run in enumerate(runs):
-                if run.text and '公司名称' in run.text:
-                    if i + 1 < len(runs): runs[i + 1].text = (runs[i + 1].text or '') + company
-                    else: run.text = run.text + company
-                    filled['company'] = True; break
-        if taskNo and not filled['taskNo'] and ('任务号' in full_text or '任务编号' in full_text):
-            for i, run in enumerate(runs):
-                if run.text and ('任务号' in run.text or '任务编号' in run.text):
-                    if i + 1 < len(runs): runs[i + 1].text = (runs[i + 1].text or '') + taskNo
-                    else: run.text = run.text + taskNo
-                    filled['taskNo'] = True; break
-        if leader and not filled['leader'] and '审核组长' in full_text:
-            for i, run in enumerate(runs):
-                if run.text and '审核组长' in run.text:
-                    if i + 1 < len(runs): runs[i + 1].text = (runs[i + 1].text or '') + leader
-                    else: run.text = run.text + leader
-                    filled['leader'] = True; break
-        if address and not filled['address'] and '审核地址' in full_text:
-            for i, run in enumerate(runs):
-                if run.text and '审核地址' in run.text:
-                    if i + 1 < len(runs): runs[i + 1].text = (runs[i + 1].text or '') + address
-                    else: run.text = run.text + address
-                    filled['address'] = True; break
-        if scope and not filled['scope'] and '认证范围' in full_text:
-            for i, run in enumerate(runs):
-                if run.text and '认证范围' in run.text:
-                    if i + 1 < len(runs): runs[i + 1].text = (runs[i + 1].text or '') + scope
-                    else: run.text = run.text + scope
-                    filled['scope'] = True; break
+    # 1. 替换段落文本 (包含日期等)
+    if date_val:
+        for para in doc.paragraphs:
+            if '日期' in para.text:
+                for run in para.runs:
+                    if '日期' in run.text and date_val not in para.text:
+                        run.text = run.text + ' ' + str(date_val)
 
-    # Process tables
+    # 2. 表格数据填入与选择框修改
     for table in doc.tables:
         for ri, row in enumerate(table.rows):
             cells = row.cells
-            if ri == 0:
-                if company and not filled['company']:
-                    for ci in range(min(3, len(cells))):
-                        for para in cells[ci].paragraphs:
-                            runs = list(para.runs)
-                            for i, run in enumerate(runs):
-                                if run.text and '公司名称' in run.text:
-                                    if i + 1 < len(runs): runs[i + 1].text = (runs[i + 1].text or '') + company
-                                    else: run.text = run.text + company
-                                    filled['company'] = True; break
-                            if filled['company']: break
-                        if filled['company']: break
-                if taskNo and not filled['taskNo'] and len(cells) > 3:
-                    for para in cells[3].paragraphs:
-                        runs = list(para.runs)
-                        for i, run in enumerate(runs):
-                            if run.text and ('任务号' in run.text or '任务编号' in run.text):
-                                if i + 1 < len(runs): runs[i + 1].text = (runs[i + 1].text or '') + taskNo
-                                else: run.text = run.text + taskNo
-                                filled['taskNo'] = True; break
-                        if filled['taskNo']: break
-            if ri == 1 and leader and not filled['leader'] and len(cells) > 2:
-                cell = cells[2]
-                has_content = any(r.text and r.text.strip() for para in cell.paragraphs for r in para.runs)
-                if not has_content:
-                    para = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
-                    para.add_run(leader); filled['leader'] = True
-            if ri == 2 and auditType:
-                at = auditType.strip()
-                for ci in range(2, min(5, len(cells))):
-                    for para in cells[ci].paragraphs:
-                        new_text = fill_cert_standard(para.text, at)
-                        if new_text != para.text:
-                            for run in para.runs: run.text = ''
-                            if para.runs: para.runs[0].text = new_text
-                            else: para.add_run(new_text)
-            if ri == 3 and auditType:
-                at = auditType.strip()
-                for ci in range(2, min(5, len(cells))):
-                    for para in cells[ci].paragraphs:
-                        new_text = fill_audit_type(para.text, at)
-                        if new_text != para.text:
-                            for run in para.runs: run.text = ''
-                            if para.runs: para.runs[0].text = new_text
-                            else: para.add_run(new_text)
-            if ri == 4 and address and not filled['address']:
-                for ci in range(2, min(5, len(cells))):
-                    for para in cells[ci].paragraphs:
+            
+            # 填入单元格基础信息
+            for cell in cells:
+                for para in cell.paragraphs:
+                    full_p = para.text
+                    # 任务号
+                    if taskNo and '任务号' in full_p and taskNo not in full_p:
                         for run in para.runs:
-                            if run.text and '审核地址' in run.text:
-                                if run.text.strip() == '审核地址：':
-                                    run.text = run.text + address; filled['address'] = True
-                                else:
-                                    runs = list(para.runs)
-                                    for i, r in enumerate(runs):
-                                        if r.text and '审核地址' in r.text:
-                                            if i + 1 < len(runs): runs[i + 1].text = (runs[i + 1].text or '') + address
-                                            else: r.text = r.text + address
-                                            filled['address'] = True; break
-                                    if filled['address']: break
-                                if filled['address']: break
-                        if filled['address']: break
-            if ri == 5 and scope and not filled['scope']:
-                for ci in range(2, min(5, len(cells))):
-                    for para in cells[ci].paragraphs:
+                            if '任务号' in run.text:
+                                run.text = run.text + ' ' + taskNo
+                    # 公司名称
+                    if company and '公司名称' in full_p and company not in full_p:
                         for run in para.runs:
-                            if run.text and '认证范围' in run.text:
-                                if run.text.strip() == '认证范围：':
-                                    run.text = run.text + scope; filled['scope'] = True
-                                else:
-                                    runs = list(para.runs)
-                                    for i, r in enumerate(runs):
-                                        if r.text and '认证范围' in r.text:
-                                            if i + 1 < len(runs): runs[i + 1].text = (runs[i + 1].text or '') + scope
-                                            else: r.text = r.text + scope
-                                            filled['scope'] = True; break
-                                    if filled['scope']: break
-                                if filled['scope']: break
-                        if filled['scope']: break
+                            if '公司名称' in run.text:
+                                run.text = run.text + ' ' + company
+                    # 审核组长
+                    if leader and '审核组长' in full_p and leader not in full_p:
+                        for run in para.runs:
+                            if '审核组长' in run.text:
+                                run.text = run.text + ' ' + leader
+                    # 审核地址
+                    if address and '审核地址' in full_p and address not in full_p:
+                        for run in para.runs:
+                            if '审核地址' in run.text:
+                                run.text = run.text + ' ' + address
+                    # 认证范围
+                    if scope and '认证范围' in full_p and scope not in full_p:
+                        for run in para.runs:
+                            if '认证范围' in run.text:
+                                run.text = run.text + ' ' + scope
+                    # 日期
+                    if date_val and '日期' in full_p and date_val not in full_p:
+                        for run in para.runs:
+                            if '日期' in run.text:
+                                run.text = run.text + ' ' + date_val
 
-    # Fill conclusion FORMCHECKBOX (FCB 66-72) via XML
+                    # 认证标准（依据任务号 TS / ER 勾选）
+                    if taskNo and ('IATF16949' in full_p or 'ISO9001' in full_p):
+                        new_text = fill_cert_standard_by_task(para.text, taskNo)
+                        if new_text != para.text:
+                            for r in para.runs: r.text = ''
+                            para.runs[0].text = new_text
+
+                    # 审核类型勾选
+                    if auditType and ('初审' in full_p or '监审' in full_p or '再认证' in full_p):
+                        new_text = fill_audit_type_new(para.text, auditType)
+                        if new_text != para.text:
+                            for r in para.runs: r.text = ''
+                            para.runs[0].text = new_text
+
+    # 3. 认证决定结论 FORMCHECKBOX 勾选
     if auditType:
-        con_idx = get_conclusion_idx(auditType)
-        buf = io.BytesIO(); doc.save(buf); buf.seek(0)
+        con_idx = get_conclusion_idx_new(auditType, decision)
+        buf = io.BytesIO()
+        doc.save(buf)
+        buf.seek(0)
         with zipfile.ZipFile(buf, 'r') as z:
             content = {name: z.read(name) for name in z.namelist()}
         doc_xml = content['word/document.xml'].decode('utf-8')
+        
         fcb_positions = []
         for m in re.finditer(r'FORMCHECKBOX', doc_xml):
             pos = m.start()
             cs = max(0, pos - 300)
             chunk = doc_xml[cs:pos + 100]
-            if 'w:checked w:val=\"0\"' in chunk: val = '0'
-            elif 'w:checked/>' in chunk: val = '1'
-            elif 'w:checked' in chunk: val = '1'
-            else: val = '?'
+            val = '1' if ('w:checked/>' in chunk or 'w:checked ' in chunk) else '0'
             fcb_positions.append((pos, val))
-        # Set the target FCB to checked, others to unchecked
+        
+        # 结论复选框默认位于最后7个 FORMCHECKBOX 位置（按原程序 FCB 66-72）
         for idx in range(7):
             abs_idx = idx + 66
             if abs_idx < len(fcb_positions):
                 abs_pos, old_val = fcb_positions[abs_idx]
                 is_target = (idx == con_idx)
                 doc_xml = set_fcb(doc_xml, abs_pos, is_target)
+                
         content['word/document.xml'] = doc_xml.encode('utf-8')
         out = io.BytesIO()
         with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zout:
             for name, data in content.items(): zout.writestr(name, data)
-        out.seek(0); doc = Document(out)
+        out.seek(0)
+        doc = Document(out)
+        
     return doc
-
-def extract_form_fields(doc):
-    fields = {}
-    for table in doc.tables:
-        for ri, row in enumerate(table.rows):
-            cells = [c.text.strip() for c in row.cells]
-            if ri == 1 and len(cells) > 1 and cells[1]: fields['taskNo'] = cells[1]
-            if ri == 2 and len(cells) > 1 and cells[1]: fields['company'] = cells[1]
-            if ri == 3 and len(cells) > 1 and cells[1]: fields['leader'] = cells[1]
-            if ri == 4 and len(cells) > 1 and cells[1]: fields['auditType'] = cells[1]
-            if ri == 5 and len(cells) > 1 and cells[1]: fields['address'] = cells[1]
-            if ri == 6 and len(cells) > 1 and cells[1]: fields['scope'] = cells[1]
-    for k in ['company','taskNo','leader','auditType','address','scope']:
-        fields.setdefault(k, '')
-    return fields
-
-def detect_format(wb):
-    ws = wb.active
-    if ws.max_column >= 15: return 'A'
-    elif ws.max_column >= 12: return 'B'
-    return 'unknown'
 
 def read_row(ws, row, fmt):
     vals = [c.value for c in row]
-    if fmt == 'A':
-        return {'company': str(vals[2]).strip() if vals[2] else '',
-                'leader': str(vals[3]).split('+')[0].strip() if vals[3] else '',
-                'auditType': str(vals[4]).strip() if vals[4] else '',
-                'address': str(vals[6]).strip() if vals[6] else '',
-                'scope': str(vals[7]).strip() if vals[7] else '',
-                'taskNo': str(vals[8]).strip() if vals[8] else ''}
-    else:
-        return {'company': str(vals[2]).strip() if vals[2] else '',
-                'leader': str(vals[3]).split('+')[0].strip() if vals[3] else '',
-                'auditType': str(vals[4]).strip() if vals[4] else '',
-                'address': str(vals[6]).strip() if vals[6] else '',
-                'scope': str(vals[7]).strip() if vals[7] else '',
-                'taskNo': str(vals[8]).strip() if vals[8] else '',
-                'date': format_date(vals[11]) if len(vals) > 11 and vals[11] else ''}
-
-def count_rows(ws):
-    c = 0
-    for ri in range(2, ws.max_row + 1):
-        row = list(ws.iter_rows(min_row=ri, max_row=ri))[0]
-        vals = [cv.value for cv in row]
-        if vals and len(vals) > 2 and vals[2]:
-            c += 1
-    return c
-
-# Streamlit UI
-st.set_page_config(page_title='Cert Report Generator', page_icon='\\U0001F4C4')
-for k in ['mode','batch_step','batch_total','batch_files','batch_processed',
-          'single_fields','form_doc','tpl_bytes','expl','ws','excel_fmt','curr_zip','all_row_data']:
-    st.session_state.setdefault(k, None if k not in ['mode','batch_step','batch_total','batch_files','batch_processed'] else 0 if k in ['batch_step','batch_total','batch_processed'] else [])
-if 'mode' not in st.session_state: st.session_state.mode = 'single'
-if 'batch_step' not in st.session_state: st.session_state.batch_step = 0
-if 'batch_total' not in st.session_state: st.session_state.batch_total = 0
-if 'batch_files' not in st.session_state: st.session_state.batch_files = []
-if 'batch_processed' not in st.session_state: st.session_state.batch_processed = 0
-if 'single_fields' not in st.session_state: st.session_state.single_fields = {}
-if 'form_doc' not in st.session_state: st.session_state.form_doc = None
-if 'tpl_bytes' not in st.session_state: st.session_state.tpl_bytes = None
-if 'expl' not in st.session_state: st.session_state.expl = None
-if 'ws' not in st.session_state: st.session_state.ws = None
-if 'excel_fmt' not in st.session_state: st.session_state.excel_fmt = None
-if 'curr_zip' not in st.session_state: st.session_state.curr_zip = None
-if 'all_row_data' not in st.session_state: st.session_state.all_row_data = None
-
-mode = st.radio('Select Mode', ['Single Report', 'Batch Generation'], key='mode')
-
-if mode == 'Single Report':
-    st.header('Single Report')
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader('Step 1: Upload FORM6101')
-        ff = st.file_uploader('Upload FORM6101', type=['docx'], key='form_up')
-    with c2:
-        st.subheader('Step 2: Upload Template')
-        tf = st.file_uploader('Upload Template', type=['docx'], key='tpl_up')
-    if ff and tf:
-        if st.session_state.form_doc is None or st.session_state.get('form_name') != ff.name:
-            st.session_state.form_doc = ff.read()
-            st.session_state.form_name = ff.name
-            st.session_state.single_fields = extract_form_fields(Document(io.BytesIO(st.session_state.form_doc)))
-        if st.session_state.tpl_bytes is None or st.session_state.get('tpl_name') != tf.name:
-            st.session_state.tpl_bytes = tf.read()
-            st.session_state.tpl_name = tf.name
-        f = st.session_state.single_fields
-        st.info('Extracted: company=' + str(f.get('company','')) + ', taskNo=' + str(f.get('taskNo','')) + ', leader=' + str(f.get('leader','')))
-        if st.button('Generate Report', type='primary', key='gen_s'):
-            with st.spinner('Generating...'):
-                try:
-                    doc = Document(io.BytesIO(st.session_state.tpl_bytes))
-                    doc = fill_report(doc, f)
-                    out = io.BytesIO()
-                    doc.save(out)
-                    out.seek(0)
-                    st.success('Report generated!')
-                    fname = str(f.get('company','report')) + '.docx'
-                    st.download_button(label='Download Report', data=out.getvalue(),
-                                       file_name=fname,
-                                       mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
-                except Exception as e:
-                    st.error('Generation failed: ' + str(e))
-    elif ff or tf:
-        st.warning('Please upload both FORM6101 and template')
-else:
-    st.header('Batch Generation')
-    c1, c2 = st.columns(2)
-    with c1:
-        ef = st.file_uploader('Upload Excel', type=['xlsx'], key='exc_up')
-    with c2:
-        tf = st.file_uploader('Upload Template', type=['docx'], key='b_tpl_up')
-    if ef and tf:
-        if st.session_state.expl is None or st.session_state.get('exc_name') != ef.name or st.session_state.get('b_tpl_name') != tf.name:
-            try:
-                wb = openpyxl.load_workbook(ef, data_only=True)
-                ws = wb.active
-                fmt = detect_format(wb)
-                total = count_rows(ws)
-                # Pre-read all valid rows
-                all_data = []
-                for ri in range(2, ws.max_row + 1):
-                    row = list(ws.iter_rows(min_row=ri, max_row=ri))[0]
-                    vals = [cv.value for cv in row]
-                    if vals and len(vals) > 2 and vals[2]:
-                        f = read_row(ws, row, fmt)
-                        if f.get('company'):
-                            all_data.append(f)
-                st.session_state.expl = wb
-                st.session_state.ws = ws
-                st.session_state.excel_fmt = fmt
-                st.session_state.batch_total = total
-                st.session_state.all_row_data = all_data
-                st.session_state.batch_processed = 0
-                st.session_state.batch_step = 0
-                st.session_state.batch_files = []
-                st.session_state.expl_name = ef.name
-                st.session_state.b_tpl_name = tf.name
-                st.session_state.b_tpl_bytes = tf.read()
-                st.info('Found ' + str(total) + ' valid rows')
-            except Exception as e:
-                st.error('Failed to load Excel: ' + str(e))
-                st.stop()
-        fmt = st.session_state.excel_fmt
-        total = st.session_state.batch_total
-        processed = st.session_state.batch_processed
-        fmt_label = 'Format A (15 cols)' if fmt == 'A' else 'Format B (12 cols)'
-        st.info('Excel format: ' + fmt_label + ', total rows: ' + str(total))
-        prog = min((processed + 20) / max(total, 1), 1.0) if total > 0 else 0
-        st.progress(prog)
-        st.write('Progress: ' + str(processed) + '/' + str(total))
-        if st.button('Start Generation (20 at a time)', key='b_start'):
-            with st.spinner('Generating...'):
-                step = st.session_state.batch_step
-                all_data = st.session_state.all_row_data
-                start_idx = step * 20
-                end_idx = min(start_idx + 20, len(all_data))
-                batch = all_data[start_idx:end_idx]
-                new = []
-                for f in batch:
-                    try:
-                        doc = Document(io.BytesIO(st.session_state.b_tpl_bytes))
-                        doc = fill_report(doc, f)
-                        out = io.BytesIO()
-                        doc.save(out)
-                        new.append((f['company'], out.getvalue()))
-                    except Exception as e:
-                        st.error(str(f['company']) + ' failed: ' + str(e))
-                if new:
-                    st.session_state.batch_files.extend(new)
-                    st.session_state.batch_step += 1
-                    st.session_state.batch_processed = min(start_idx + len(new), total)
-                    zb = io.BytesIO()
-                    with zipfile.ZipFile(zb, 'w', zipfile.ZIP_DEFLATED) as zf:
-                        for n, d in new:
-                            zf.writestr(n + '.docx', d)
-                    zb.seek(0)
-                    st.session_state.curr_zip = zb.getvalue()
-                    st.success('Generated ' + str(len(new)) + ' reports (total: ' + str(st.session_state.batch_processed) + '/' + str(total) + ')')
-                    fname = 'reports_batch_' + str(step + 1) + '.zip'
-                    st.download_button(label='Download Batch (ZIP)', data=st.session_state.curr_zip,
-                                       file_name=fname, mime='application/zip')
-                    if st.session_state.batch_processed >= total:
-                        st.success('All reports generated!')
-                        if len(st.session_state.batch_files) > 1:
-                            azb = io.BytesIO()
-                            with zipfile.ZipFile(azb, 'w', zipfile.ZIP_DEFLATED) as zf:
-                                for n, d in st.session_state.batch_files:
-                                    zf.writestr(n + '.docx', d)
-                            azb.seek(0)
-                            st.download_button(label='Download All (ZIP)', data=azb.getvalue(),
-                                               file_name='all_reports.zip', mime='application/zip')
-        if st.button('Clear and Restart', key='b_clear'):
-            st.session_state.batch_step = 0
-            st.session_state.batch_processed = 0
-            st.session_state.batch_files = []
-            st.session_state.expl = None
-            st.session_state.curr_zip = None
-            st.session_state.all_row_data = None
-            st.rerun()
-    elif ef or tf:
-        st.warning('Please upload both Excel and template')
+    
+    # 提取第一个组长姓名
+    leader_val = str(vals[3]).split('+')[0].strip() if len(vals) > 3 and vals[3] else ''
+    
+    return {
+        'company': str(vals[2]).strip() if len(vals) > 2 and vals[2] else '',
+        'leader': leader_val,
+        'auditType': str(vals[4]).strip() if len(vals) > 4 and vals[4] else '',
+        'address': str(vals[6]).strip() if len(vals) > 6 and vals[6] else '',
+        'scope': str(vals[7]).strip() if len(vals) > 7 and vals[7] else '',
+        'taskNo': str(vals[8]).strip() if len(vals) > 8 and vals[8] else '',
+        'date': format_date(vals[11]) if len(vals) > 11 and vals[11] else '',
+        'decision': str(vals[10]).strip() if len(vals) > 10 and vals[10] else ''  # 获取认证决定结论文本
+    }
 
 st.markdown('---')
 st.caption('Cert Report Generator v2.8')
