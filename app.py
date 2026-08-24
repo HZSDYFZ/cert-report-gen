@@ -13,7 +13,7 @@ st.set_page_config(
 
 # 界面主标题与简要说明
 st.title("📄 认证报告自动化生成系统")
-st.caption("支持单份 FORM6101 报告匹配生成与 Excel 数据批量报告导出")
+st.caption("支持单份 FORM6101 报告匹配生成与 Excel 数据低 CPU 占用分批导出")
 st.markdown("---")
 
 CHK_EMPTY = chr(0x25A1)
@@ -93,7 +93,7 @@ def fill_audit_type(cell_text, atype):
         result = result.replace(CHK_EMPTY + '特殊审核', CHK_FILLED + '特殊审核')
     return result
 
-# Single Report 专属逻辑（完整版）
+# Single Report 专属填充逻辑
 def fill_report(doc, fields):
     company = fields.get('company', '')
     taskNo = fields.get('taskNo', '')
@@ -264,8 +264,7 @@ def extract_form_fields(doc):
         fields.setdefault(k, '')
     return fields
 
-# ==================== BATCH GENERATION 专用专属逻辑 ====================
-
+# BATCH GENERATION 专属解析与填充逻辑
 def batch_read_row(row):
     vals = [c.value for c in row]
     leader_raw = str(vals[3]).strip() if len(vals) > 3 and vals[3] else ''
@@ -409,9 +408,9 @@ def batch_fill_report(doc, fields):
         
     return doc
 
-# ==================== STREAMLIT UI ====================
+# ==================== STREAMLIT UI 页面交互 ====================
 
-mode = st.radio('选择操作模式', ['Single Report (单份生成)', 'Batch Generation (批量导出)'], key='app_mode')
+mode = st.radio('选择操作模式', ['Single Report (单份生成)', 'Batch Generation (防降频分批导出)'], key='app_mode')
 
 if 'Single Report' in mode:
     st.header('单份报告生成模式')
@@ -434,7 +433,7 @@ if 'Single Report' in mode:
                 st.error(f"生成失败: {str(e)}")
 
 else:
-    st.header('批量报告导出模式')
+    st.header('批量报告导出模式（低 CPU 占用分批版）')
     c1, c2 = st.columns(2)
     with c1:
         ef = st.file_uploader('1. 上传 Excel 数据源 (.xlsx)', type=['xlsx'], key='b_excel')
@@ -453,24 +452,52 @@ else:
                     if item['company']:
                         rows_data.append(item)
 
-            st.info(f"📊 成功解析 Excel，共找到 {len(rows_data)} 条公司记录。")
+            total_count = len(rows_data)
+            st.info(f"📊 成功解析 Excel，共找到 **{total_count}** 条公司记录。")
 
-            if st.button('🚀 开始批量导出报告 (打包ZIP)', type='primary'):
-                with st.spinner('正在批量生成中，请稍候...'):
-                    zb = io.BytesIO()
-                    tpl_bytes = tf.getvalue()
-                    with zipfile.ZipFile(zb, 'w', zipfile.ZIP_DEFLATED) as zf:
-                        for item in rows_data:
-                            try:
-                                doc = batch_fill_report(Document(io.BytesIO(tpl_bytes)), item)
-                                out = io.BytesIO()
-                                doc.save(out)
-                                zf.writestr(f"{item['company']}.docx", out.getvalue())
-                            except Exception as err:
-                                st.warning(f"跳过 {item['company']}：{err}")
+            if total_count > 0:
+                st.markdown("### ⚙️ 防 Throttling 极速分批生成控制")
+                col_batch_size, col_batch_num = st.columns(2)
+                
+                with col_batch_size:
+                    batch_size = st.number_input('每批次处理数量（推荐 10-20 条）：', min_value=1, max_value=50, value=15, step=5)
+                
+                total_batches = (total_count + batch_size - 1) // batch_size
+                
+                with col_batch_num:
+                    selected_batch = st.selectbox(
+                        f'选择要生成的批次（共 {total_batches} 批）：',
+                        options=list(range(1, total_batches + 1)),
+                        format_func=lambda x: f"第 {x} 批 (涵盖第 {(x-1)*batch_size + 1} ~ {min(x*batch_size, total_count)} 条数据)"
+                    )
+                
+                start_idx = (selected_batch - 1) * batch_size
+                end_idx = min(selected_batch * batch_size, total_count)
+                current_batch_data = rows_data[start_idx:end_idx]
 
-                    zb.seek(0)
-                    st.success("🎉 全部报告批量导出完毕！")
-                    st.download_button('📥 点击下载压缩包 (ZIP)', zb.getvalue(), file_name="batch_reports.zip", mime="application/zip")
+                st.write(f"📋 **当前批次预览**（包含 {len(current_batch_data)} 家公司）：", [d['company'] for d in current_batch_data])
+
+                if st.button(f'🚀 生成第 {selected_batch} 批报告并打包 ZIP', type='primary'):
+                    with st.spinner(f'正在处理第 {selected_batch} 批（共 {len(current_batch_data)} 份），保持 CPU 健康运行...'):
+                        zb = io.BytesIO()
+                        tpl_bytes = tf.getvalue()
+                        with zipfile.ZipFile(zb, 'w', zipfile.ZIP_DEFLATED) as zf:
+                            for item in current_batch_data:
+                                try:
+                                    doc = batch_fill_report(Document(io.BytesIO(tpl_bytes)), item)
+                                    out = io.BytesIO()
+                                    doc.save(out)
+                                    zf.writestr(f"{item['company']}.docx", out.getvalue())
+                                except Exception as err:
+                                    st.warning(f"跳过 {item['company']}：{err}")
+
+                        zb.seek(0)
+                        st.success(f"🎉 第 {selected_batch} 批报告导出完成！")
+                        st.download_button(
+                            label=f'📥 下载第 {selected_batch} 批压缩包 (batch_{selected_batch}.zip)',
+                            data=zb.getvalue(),
+                            file_name=f"认证报告_第{selected_batch}批.zip",
+                            mime="application/zip"
+                        )
         except Exception as e:
             st.error(f"处理 Excel/Word 发生错误: {str(e)}")
