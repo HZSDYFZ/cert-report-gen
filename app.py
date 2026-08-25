@@ -205,6 +205,7 @@ def fill_report(doc, fields):
                             if run.text and "认证范围" in run.text:
                                 if run.text.strip() == "认证范围：":
                                     run.text = run.text + scope
+                                    filled["scope"] = True; break
                                 else:
                                     runs = list(para.runs)
                                     for i, r in enumerate(runs):
@@ -552,3 +553,4 @@ else:
         st.info("请上传 Excel 数据文件和报告模版")
 
 st.caption("Cert Report Generator v3.0")
+
