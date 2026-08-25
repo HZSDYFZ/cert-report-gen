@@ -19,18 +19,31 @@ st.markdown("---")
 CHK_EMPTY = chr(0x25A1)
 CHK_FILLED = chr(0x25A0)
 
+def clean_text(val):
+    """清洗提取到的文本，去除多余换行符、回车和两端空格"""
+    if val is None:
+        return ''
+    s = str(val).replace('\r', '').replace('\n', ' ').strip()
+    return re.sub(r'\s+', ' ', s)
+
 def format_date(val):
     if val is None: return ''
     if isinstance(val, datetime): return val.strftime('%Y-%m-%d')
     s = str(val).strip()
     m = re.search(r'(\d{4})[年\-/](\d{1,2})[月\-/](\d{1,2})', s)
-    if m: return m.group(1)+'-'+m.group(2).zfill(2)+'-'+m.group(3).zfill(2)
+    if m: 
+        return f"{m.group(1)}-{m.group(2).zfill(2)}-{m.group(3).zfill(2)}"
     m = re.search(r'(\d{1,2})/(\d{1,2})/(\d{4})', s)
-    if m: return m.group(3)+'-'+m.group(1).zfill(2)+'-'+m.group(2).zfill(2)
+    if m: 
+        return f"{m.group(3)}-{m.group(1).zfill(2)}-{m.group(2).zfill(2)}"
+    # 如果包含其他干扰文字，只截取干净的日期部分
+    clean_d = re.search(r'\d{4}-\d{2}-\d{2}', s)
+    if clean_d:
+        return clean_d.group(0)
     return s[:10] if len(s) >= 10 else s
 
 def get_conclusion_idx(atype):
-    atype = str(atype).strip() if atype else ''
+    atype = clean_text(atype)
     is_surv = '监' in atype and '再认证' not in atype and '二阶段' not in atype and '一阶段' not in atype
     if '一阶段' in atype or '二阶段' in atype or '再认证' in atype:
         return 0
@@ -58,22 +71,22 @@ def set_fcb(doc_xml, pos, checked):
     return doc_xml
 
 def fill_cert_standard(cell_text, atype):
-    at = atype.strip()
+    at = clean_text(atype)
     result = cell_text
-    if 'IATF16949' in cell_text and 'IATF' in at:
-        result = result.replace(CHK_EMPTY + ' IATF16949', CHK_FILLED + ' IATF16949')
-    if 'ISO9001' in cell_text and '9001' in at:
-        result = result.replace(CHK_EMPTY + ' ISO9001', CHK_FILLED + ' ISO9001')
+    if 'IATF16949' in cell_text and ('IATF' in at or '16949' in at):
+        result = result.replace(CHK_EMPTY + ' IATF16949', CHK_FILLED + ' IATF16949').replace(CHK_EMPTY + 'IATF16949', CHK_FILLED + 'IATF16949')
+    if 'ISO9001' in cell_text and ('9001' in at or 'QMS' in at):
+        result = result.replace(CHK_EMPTY + ' ISO9001', CHK_FILLED + ' ISO9001').replace(CHK_EMPTY + 'ISO9001', CHK_FILLED + 'ISO9001')
     if 'ISO14001' in cell_text and ('EMS' in at or '14001' in at):
-        result = result.replace(CHK_EMPTY + ' ISO14001', CHK_FILLED + ' ISO14001')
+        result = result.replace(CHK_EMPTY + ' ISO14001', CHK_FILLED + ' ISO14001').replace(CHK_EMPTY + 'ISO14001', CHK_FILLED + 'ISO14001')
     if 'ISO45001' in cell_text and ('OHS' in at or '45001' in at):
         result = result.replace(CHK_EMPTY + 'ISO 45001', CHK_FILLED + 'ISO 45001').replace(CHK_EMPTY + 'ISO45001', CHK_FILLED + 'ISO45001')
     return result
 
 def fill_audit_type(cell_text, atype):
-    at = atype.strip()
+    at = clean_text(atype)
     result = cell_text
-    if '一阶段' in at or '二阶段' in at or '再认证' in at:
+    if '一阶段' in at or '二阶段' in at or '初审' in at:
         result = result.replace(CHK_EMPTY + '初审', CHK_FILLED + '初审')
     if is_audit_surv(at):
         result = result.replace(CHK_EMPTY + '监审', CHK_FILLED + '监审')
@@ -85,33 +98,38 @@ def fill_audit_type(cell_text, atype):
 
 # 单份填报逻辑
 def fill_report(doc, fields):
-    company, taskNo, leader = fields.get('company', ''), fields.get('taskNo', ''), fields.get('leader', '')
-    auditType, address, scope = fields.get('auditType', ''), fields.get('address', ''), fields.get('scope', '')
+    company = clean_text(fields.get('company', ''))
+    taskNo = clean_text(fields.get('taskNo', ''))
+    leader = clean_text(fields.get('leader', ''))
+    auditType = clean_text(fields.get('auditType', ''))
+    address = clean_text(fields.get('address', ''))
+    scope = clean_text(fields.get('scope', ''))
+    
     filled = {'company': False, 'taskNo': False, 'leader': False, 'address': False, 'scope': False}
 
     for para in doc.paragraphs:
         runs = list(para.runs)
         full_text = ''.join(r.text or '' for r in runs)
         for k, name in [('company', '公司名称'), ('taskNo', '任务号'), ('leader', '审核组长'), ('address', '审核地址'), ('scope', '认证范围')]:
-            if fields.get(k) and not filled[k] and name in full_text:
+            val = fields.get(k, '')
+            if val and not filled[k] and name in full_text:
                 for i, run in enumerate(runs):
                     if run.text and name in run.text:
-                        if i + 1 < len(runs): runs[i + 1].text = (runs[i + 1].text or '') + fields[k]
-                        else: run.text = run.text + fields[k]
+                        if i + 1 < len(runs): runs[i + 1].text = (runs[i + 1].text or '') + val
+                        else: run.text = run.text + val
                         filled[k] = True; break
 
     for table in doc.tables:
         for ri, row in enumerate(table.rows):
             cells = row.cells
-            if ri == 0:
-                if company and not filled['company']:
-                    for ci in range(min(3, len(cells))):
-                        for para in cells[ci].paragraphs:
-                            for i, run in enumerate(para.runs):
-                                if run.text and '公司名称' in run.text:
-                                    run.text = run.text + company; filled['company'] = True; break
-                            if filled['company']: break
+            if ri == 0 and company and not filled['company']:
+                for ci in range(min(3, len(cells))):
+                    for para in cells[ci].paragraphs:
+                        for i, run in enumerate(para.runs):
+                            if run.text and '公司名称' in run.text:
+                                run.text = run.text + company; filled['company'] = True; break
                         if filled['company']: break
+                    if filled['company']: break
             if ri == 2 and auditType:
                 for ci in range(2, min(5, len(cells))):
                     for para in cells[ci].paragraphs:
@@ -147,7 +165,7 @@ def extract_form_fields(doc):
     fields = {}
     for table in doc.tables:
         for ri, row in enumerate(table.rows):
-            cells = [c.text.strip() for c in row.cells]
+            cells = [clean_text(c.text) for c in row.cells]
             if ri == 1 and len(cells) > 1: fields['taskNo'] = cells[1]
             if ri == 2 and len(cells) > 1: fields['company'] = cells[1]
             if ri == 3 and len(cells) > 1: fields['leader'] = cells[1]
@@ -156,45 +174,62 @@ def extract_form_fields(doc):
             if ri == 6 and len(cells) > 1: fields['scope'] = cells[1]
     return fields
 
-# 批量解析数据
+# 批量数据提取（精准清洗）
 def batch_read_row(vals):
-    leader_raw = str(vals[3]).strip() if len(vals) > 3 and vals[3] else ''
+    leader_raw = clean_text(vals[3]) if len(vals) > 3 and vals[3] else ''
     return {
-        'company': str(vals[2]).strip() if len(vals) > 2 and vals[2] else '',
+        'company': clean_text(vals[2]) if len(vals) > 2 and vals[2] else '',
         'leader': leader_raw.split('+')[0].strip(),
-        'auditType': str(vals[4]).strip() if len(vals) > 4 and vals[4] else '',
-        'address': str(vals[6]).strip() if len(vals) > 6 and vals[6] else '',
-        'scope': str(vals[7]).strip() if len(vals) > 7 and vals[7] else '',
-        'taskNo': str(vals[8]).strip() if len(vals) > 8 and vals[8] else '',
-        'decision': str(vals[10]).strip() if len(vals) > 10 and vals[10] else '',
+        'auditType': clean_text(vals[4]) if len(vals) > 4 and vals[4] else '',
+        'address': clean_text(vals[6]) if len(vals) > 6 and vals[6] else '',
+        'scope': clean_text(vals[7]) if len(vals) > 7 and vals[7] else '',
+        'taskNo': clean_text(vals[8]) if len(vals) > 8 and vals[8] else '',
+        'decision': clean_text(vals[10]) if len(vals) > 10 and vals[10] else '',
         'date': format_date(vals[11]) if len(vals) > 11 and vals[11] else ''
     }
 
 def batch_get_conclusion_idx(atype, decision):
-    at, dec = str(atype).strip(), str(decision).strip()
-    is_surv = ('监一' in at or '监二' in at)
-    if '二阶段' in at or '再认证' in at: return 0
-    elif '转移' in at: return 2
-    elif is_surv and '不换证' in dec: return 4
-    elif is_surv and '换发' in dec: return 5
-    elif '特殊' in at and '换发' in dec: return 3
+    at, dec = clean_text(atype), clean_text(decision)
+    is_surv = ('监' in at or '监督' in at)
+    
+    if '二阶段' in at or '再认证' in at or '初审' in at: 
+        return 0  # 默认通过，可发证
+    elif '转移' in at: 
+        return 2  # 通过，可换发证书
+    elif is_surv:
+        if '不换证' in dec or '保持' in dec:
+            return 4  # 通过，不换证
+        elif '换发' in dec or '换证' in dec:
+            return 5  # 通过，可换发新的认证证书
+        return 4  # 监审默认不换证
+    elif '特殊' in at:
+        return 3 if ('换发' in dec or '换证' in dec) else 0
     return 0
 
-# 极速版 Word 批量填充
+# 极速版 Word 批量填充（含精准文本写入）
 def batch_fill_report_fast(tpl_doc_bytes, fields):
     doc = Document(io.BytesIO(tpl_doc_bytes))
-    company, taskNo, leader = fields.get('company', ''), fields.get('taskNo', ''), fields.get('leader', '')
-    auditType, address, scope = fields.get('auditType', ''), fields.get('address', ''), fields.get('scope', '')
-    date_val, decision = fields.get('date', ''), fields.get('decision', '')
+    company = fields.get('company', '')
+    taskNo = fields.get('taskNo', '')
+    leader = fields.get('leader', '')
+    auditType = fields.get('auditType', '')
+    address = fields.get('address', '')
+    scope = fields.get('scope', '')
+    date_val = fields.get('date', '')
+    decision = fields.get('decision', '')
 
     tn_upper = str(taskNo).upper()
     has_ts, has_er = 'TS' in tn_upper, 'ER' in tn_upper
 
+    # 日期覆盖写入，避免叠加垃圾字符
     if date_val:
         for para in doc.paragraphs:
-            if '日期' in para.text and date_val not in para.text:
-                for run in para.runs:
-                    if '日期' in run.text: run.text += ' ' + str(date_val)
+            if '日期' in para.text:
+                full_p = para.text
+                if re.search(r'日期[：:]', full_p):
+                    for run in para.runs:
+                        if '日期' in run.text:
+                            run.text = re.sub(r'日期[：:]\s*.*', f'日期：{date_val}', run.text)
 
     for table in doc.tables:
         for row in table.rows:
@@ -203,24 +238,31 @@ def batch_fill_report_fast(tpl_doc_bytes, fields):
                     full_p = para.text
                     if not full_p.strip(): continue
                     
+                    # 替换占位文字而非简单尾部叠加
                     if taskNo and ('任务号' in full_p or '任务编号' in full_p) and taskNo not in full_p:
                         for run in para.runs:
-                            if '任务号' in run.text or '任务编号' in run.text: run.text += ' ' + taskNo
+                            if '任务号' in run.text or '任务编号' in run.text:
+                                run.text = re.sub(r'(任务号|任务编号)[：:]?\s*.*', r'\1：' + taskNo, run.text)
                     if company and '公司名称' in full_p and company not in full_p:
                         for run in para.runs:
-                            if '公司名称' in run.text: run.text += ' ' + company
+                            if '公司名称' in run.text:
+                                run.text = re.sub(r'公司名称[：:]?\s*.*', '公司名称：' + company, run.text)
                     if leader and '审核组长' in full_p and leader not in full_p:
                         for run in para.runs:
-                            if '审核组长' in run.text: run.text += ' ' + leader
+                            if '审核组长' in run.text:
+                                run.text = re.sub(r'审核组长[：:]?\s*.*', '审核组长：' + leader, run.text)
                     if address and '审核地址' in full_p and address not in full_p:
                         for run in para.runs:
-                            if '审核地址' in run.text: run.text += ' ' + address
+                            if '审核地址' in run.text:
+                                run.text = re.sub(r'审核地址[：:]?\s*.*', '审核地址：' + address, run.text)
                     if scope and '认证范围' in full_p and scope not in full_p:
                         for run in para.runs:
-                            if '认证范围' in run.text: run.text += ' ' + scope
+                            if '认证范围' in run.text:
+                                run.text = re.sub(r'认证范围[：:]?\s*.*', '认证范围：' + scope, run.text)
                     if date_val and '日期' in full_p and date_val not in full_p:
                         for run in para.runs:
-                            if '日期' in run.text: run.text += ' ' + date_val
+                            if '日期' in run.text:
+                                run.text = re.sub(r'日期[：:]?\s*.*', '日期：' + date_val, run.text)
 
                     if 'IATF16949' in full_p or 'ISO9001' in full_p:
                         new_t = para.text
@@ -232,8 +274,8 @@ def batch_fill_report_fast(tpl_doc_bytes, fields):
 
                     if auditType and ('初审' in full_p or '监审' in full_p or '再认证' in full_p or '特殊审核' in full_p):
                         new_t = para.text
-                        if '二阶段' in auditType: new_t = new_t.replace(CHK_EMPTY + '初审', CHK_FILLED + '初审')
-                        if '监一' in auditType or '监二' in auditType: new_t = new_t.replace(CHK_EMPTY + '监审', CHK_FILLED + '监审')
+                        if '二阶段' in auditType or '初审' in auditType: new_t = new_t.replace(CHK_EMPTY + '初审', CHK_FILLED + '初审')
+                        if '监' in auditType: new_t = new_t.replace(CHK_EMPTY + '监审', CHK_FILLED + '监审')
                         if '再认证' in auditType or '转移' in auditType: new_t = new_t.replace(CHK_EMPTY + '再认证/转移', CHK_FILLED + '再认证/转移')
                         if '特殊' in auditType: new_t = new_t.replace(CHK_EMPTY + '特殊审核', CHK_FILLED + '特殊审核')
                         if new_t != para.text:
@@ -244,29 +286,28 @@ def batch_fill_report_fast(tpl_doc_bytes, fields):
     doc.save(out_buf)
     out_buf.seek(0)
 
-    if auditType:
-        con_idx = batch_get_conclusion_idx(auditType, decision)
-        with zipfile.ZipFile(out_buf, 'r') as z:
-            content = {name: z.read(name) for name in z.namelist()}
-        
-        doc_xml = content['word/document.xml'].decode('utf-8')
-        fcb_positions = [m.start() for m in re.finditer(r'FORMCHECKBOX', doc_xml)]
-        
-        for idx in range(7):
-            abs_idx = idx + 66
-            if abs_idx < len(fcb_positions):
-                doc_xml = set_fcb(doc_xml, fcb_positions[abs_idx], idx == con_idx)
-                
-        content['word/document.xml'] = doc_xml.encode('utf-8')
-        
-        res_buf = io.BytesIO()
-        with zipfile.ZipFile(res_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
-            for name, data in content.items(): zout.writestr(name, data)
-        return res_buf.getvalue()
-        
-    return out_buf.getvalue()
+    # 强制进行结论 FORMCHECKBOX 匹配勾选
+    con_idx = batch_get_conclusion_idx(auditType, decision)
+    with zipfile.ZipFile(out_buf, 'r') as z:
+        content = {name: z.read(name) for name in z.namelist()}
+    
+    doc_xml = content['word/document.xml'].decode('utf-8')
+    fcb_positions = [m.start() for m in re.finditer(r'FORMCHECKBOX', doc_xml)]
+    
+    # 针对结论部分的复选框进行准确定位
+    for idx in range(7):
+        abs_idx = idx + 66
+        if abs_idx < len(fcb_positions):
+            doc_xml = set_fcb(doc_xml, fcb_positions[abs_idx], idx == con_idx)
+            
+    content['word/document.xml'] = doc_xml.encode('utf-8')
+    
+    res_buf = io.BytesIO()
+    with zipfile.ZipFile(res_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+        for name, data in content.items(): zout.writestr(name, data)
+    return res_buf.getvalue()
 
-# Streamlit UI
+# Streamlit UI 界面
 mode = st.radio('选择操作模式', ['Single Report (单份生成)', 'Batch Generation (防降频极速版)'], key='app_mode')
 
 if 'Single Report' in mode:
