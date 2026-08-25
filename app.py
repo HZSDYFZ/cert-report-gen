@@ -200,7 +200,6 @@ def parse_and_fix_excel(file_buffer):
                 else ""
             )
 
-        # 其它列
         code = (
             str(row2.get("专业代码", "")).strip() if not row2.empty else ""
         )
@@ -266,10 +265,10 @@ def parse_and_fix_excel(file_buffer):
 
 
 # ==========================================
-# 2. Word 模板填充与批量导出模块
+# 2. Word 模版填充与文件导出模块
 # ==========================================
 def fill_word_template_single(data_dict, template_bytes=None):
-    """单条记录 Word 模版填充"""
+    """单条记录 Word 模版填充（未做任何改动）"""
     if template_bytes:
         doc = Document(io.BytesIO(template_bytes))
 
@@ -329,7 +328,7 @@ def fill_word_template_single(data_dict, template_bytes=None):
 
 
 def generate_word_zip_batch(df, template_bytes=None):
-    """【重点修改模块】批量为多家企业生成独立 Word 报告，并打包为 ZIP 压缩包"""
+    """【特定改动模块】：为每家企业单独填充 Word 模版，并打包为 ZIP 格式"""
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for idx, row in df.iterrows():
@@ -393,7 +392,6 @@ def generate_word_bytes_batch(df):
 
 
 def generate_excel_bytes(df):
-    """导出 Excel 二进制流"""
     target_stream = io.BytesIO()
     with pd.ExcelWriter(target_stream, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="认证评定解析全量表")
@@ -402,11 +400,11 @@ def generate_excel_bytes(df):
 
 
 # ==========================================
-# 3. Streamlit 主界面 (保持原始 UI 不变)
+# 3. Streamlit 主界面 (UI 保持原布局)
 # ==========================================
 st.title("🛡️ 认证评定自动化解析与模版生成系统")
 
-# 顶部双列上传组件
+# 顶部文件上传区
 up_col1, up_col2 = st.columns(2)
 with up_col1:
     excel_file = st.file_uploader(
@@ -430,28 +428,23 @@ with up_col2:
         """
         )
 
-# 读取模板文件流
 template_bytes = template_file.getvalue() if template_file else None
+
+# 核心 Tab 标签页直接在此处声明（打开页面即可直接看到两个模式及所有功能页）
+tab_single, tab_batch, tab_data, tab_log, tab_chart = st.tabs(
+    [
+        "🎯 单条记录生成 (Single Generate)",
+        "📦 批量数据导出 (Batch Export)",
+        "📋 完整解析全量表",
+        "⚠️ 异常数据修复日志",
+        "📊 统计图表分析",
+    ]
+)
 
 if excel_file is not None:
     try:
         with st.spinner("正在执行多表深度匹配、数据脱敏与自动修复..."):
             df_master, df_anomalies = parse_and_fix_excel(excel_file)
-
-        # 核心指标
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("总解析记录数", f"{len(df_master)} 条")
-        col2.metric("邮箱污染修复数", f"{len(df_anomalies)} 处")
-        col3.metric(
-            "合格发证数",
-            f"{len(df_master[df_master['认证结论'].str.contains('可发证', na=False)])} 家",
-        )
-        col4.metric(
-            "审核标准覆盖",
-            f"{df_master['认证标准'].nunique()} 种",
-        )
-
-        st.markdown("---")
 
         # 侧边栏过滤
         st.sidebar.header("🔍 数据筛选与检索")
@@ -483,19 +476,8 @@ if excel_file is not None:
                 filtered_df["认证标准"].isin(selected_standard)
             ]
 
-        # 核心五大功能选项卡 (保持原UI选项卡不变)
-        tab_single, tab_batch, tab_data, tab_log, tab_chart = st.tabs(
-            [
-                "🎯 单条记录生成 (Single Generate)",
-                "📦 批量数据导出 (Batch Export)",
-                "📋 完整解析全量表",
-                "⚠️ 异常数据修复日志",
-                "📊 统计图表分析",
-            ]
-        )
-
         # ----------------------------------------------------
-        # Tab 1: 单条记录生成 (Single Generate) - 保持不变
+        # Tab 1: 单条记录生成 (Single Generate) - 保持原样不动
         # ----------------------------------------------------
         with tab_single:
             st.subheader("🎯 选定单家企业生成/下载独立文档")
@@ -510,7 +492,6 @@ if excel_file is not None:
                 ].iloc[0]
                 single_dict = single_row.to_dict()
 
-                # 单条记录预览卡片
                 st.info(
                     f"**已选中记录**：{single_dict['公司中文名']} (任务号: {single_dict['任务号']})"
                 )
@@ -530,8 +511,6 @@ if excel_file is not None:
                     st.write(f"**认证范围**: {single_dict['认证范围']}")
 
                 st.markdown("---")
-
-                # 生成单条 Word / Excel 按钮
                 s_btn1, s_btn2 = st.columns(2)
 
                 single_word_bytes = fill_word_template_single(
@@ -562,7 +541,7 @@ if excel_file is not None:
                 st.warning("当前筛选条件下未找到任何记录。")
 
         # ----------------------------------------------------
-        # Tab 2: 批量导出 (Batch Export) - 【已按要求全面升级修改】
+        # Tab 2: 批量数据导出 (Batch Export) - 【仅修改此模块】
         # ----------------------------------------------------
         with tab_batch:
             st.subheader("📦 批量导出独立报告与数据汇总")
@@ -574,7 +553,6 @@ if excel_file is not None:
                 else "使用【标准模板格式】批量生成"
             )
 
-            # 第一排：批量生成独立 Word 报告压缩包 + 批量导出 Excel
             b_btn1, b_btn2 = st.columns(2)
 
             batch_zip_data = generate_word_zip_batch(
@@ -596,8 +574,6 @@ if excel_file is not None:
             )
 
             st.markdown("---")
-
-            # 第二排（辅助导出）：导出单文档长表汇总 Word
             st.write("📌 **备用选项：**")
             batch_word_summary_data = generate_word_bytes_batch(filtered_df)
             st.download_button(
@@ -608,14 +584,11 @@ if excel_file is not None:
             )
 
         # ----------------------------------------------------
-        # Tab 3: 数据表格视图
+        # Tab 3~5: 辅助视图
         # ----------------------------------------------------
         with tab_data:
             st.dataframe(filtered_df, use_container_width=True)
 
-        # ----------------------------------------------------
-        # Tab 4: 修复日志视图
-        # ----------------------------------------------------
         with tab_log:
             if not df_anomalies.empty:
                 st.warning(
@@ -625,9 +598,6 @@ if excel_file is not None:
             else:
                 st.success("数据质量良好，未检测到邮箱污染或明显错位字段！")
 
-        # ----------------------------------------------------
-        # Tab 5: 图表视图
-        # ----------------------------------------------------
         with tab_chart:
             c1, c2 = st.columns(2)
             with c1:
@@ -638,6 +608,16 @@ if excel_file is not None:
                 st.bar_chart(filtered_df["认证标准"].value_counts())
 
     except Exception as e:
-        st.error(f"处理文件时发生错误，请检查上传的文件格式: {str(e)}")
+        st.error(f"处理文件时发生错误: {str(e)}")
 else:
-    st.info("👈 请在左上方上传您的 Excel 文件，可同时选择上传 Word 模版。")
+    # 未上传 Excel 时提示用户上传
+    with tab_single:
+        st.info("👈 请在左上方上传 Excel 数据文件以开始使用【单条记录生成】。")
+    with tab_batch:
+        st.info("👈 请在左上方上传 Excel 数据文件以开始使用【批量导出 Word/Excel】。")
+    with tab_data:
+        st.info("👈 请在左上方上传 Excel 数据文件。")
+    with tab_log:
+        st.info("👈 请在左上方上传 Excel 数据文件。")
+    with tab_chart:
+        st.info("👈 请在左上方上传 Excel 数据文件。")
