@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import io
 import re
+import zipfile
 import pandas as pd
 import streamlit as st
 from docx import Document
@@ -12,10 +13,10 @@ st.set_page_config(
 
 
 # ==========================================
-# 1. 核心解析引擎 (四表联动与异常修复)
+# 1. 核心解析与数据清洗引擎 (Sheet1 ~ Sheet4)
 # ==========================================
 def parse_and_fix_excel(file_buffer):
-    """四表联动解析与数据清洗核心引擎 (Sheet1 ~ Sheet4)"""
+    """四表联动解析与数据清洗核心引擎"""
     xls = pd.ExcelFile(file_buffer)
 
     df1 = pd.read_excel(xls, sheet_name="Sheet1")
@@ -265,18 +266,17 @@ def parse_and_fix_excel(file_buffer):
 
 
 # ==========================================
-# 2. Word 模板填充引擎 (支持用户自定义模板)
+# 2. Word 模板填充与批量导出模块
 # ==========================================
 def fill_word_template_single(data_dict, template_bytes=None):
-    """为单条记录填充 Word 模板（若无模板则生成标准卡片）"""
+    """单条记录 Word 模版填充"""
     if template_bytes:
-        # 使用用户上传的自定义 Word 模板填充
         doc = Document(io.BytesIO(template_bytes))
 
         def replace_in_paragraphs(paragraphs, data):
             for p in paragraphs:
                 for k, v in data.items():
-                    tag = f"{{{{{k}}}}}"  # {{字段名}}
+                    tag = f"{{{{{k}}}}}"
                     if tag in p.text:
                         p.text = p.text.replace(
                             tag, str(v) if pd.notna(v) and v != "" else ""
@@ -287,9 +287,7 @@ def fill_word_template_single(data_dict, template_bytes=None):
             for row in table.rows:
                 for cell in row.cells:
                     replace_in_paragraphs(cell.paragraphs, data_dict)
-
     else:
-        # 未上传模板时，使用系统内置默认文档布局
         doc = Document()
         doc.add_heading(f"认证评定单项报告 - {data_dict['公司中文名']}", level=1)
 
@@ -316,9 +314,7 @@ def fill_word_template_single(data_dict, template_bytes=None):
         p.add_run(f"{data_dict['评定人员']}\n")
 
         p.add_run("• 认证结论：").bold = True
-        r_dec = p_body = p.add_run(f"{data_dict['认证结论']}")
-        r_dec.bold = True
-        p.add_run(f"   |   结论日期：{data_dict['结论日期']}\n")
+        p.add_run(f"{data_dict['认证结论']}   |   结论日期：{data_dict['结论日期']}\n")
 
         p.add_run("• 审核地址：").bold = True
         p.add_run(f"{data_dict['审核地址']}\n")
@@ -332,8 +328,33 @@ def fill_word_template_single(data_dict, template_bytes=None):
     return target_stream.getvalue()
 
 
-def generate_word_bytes_batch(df, template_bytes=None):
-    """批量导出所有记录的汇总 Word 报告"""
+def generate_word_zip_batch(df, template_bytes=None):
+    """【重点修改模块】批量为多家企业生成独立 Word 报告，并打包为 ZIP 压缩包"""
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for idx, row in df.iterrows():
+            data_dict = row.to_dict()
+            doc_bytes = fill_word_template_single(data_dict, template_bytes)
+
+            raw_company = str(data_dict.get("公司中文名", f"企业_{idx + 1}"))
+            company_name = re.sub(r'[\\/*?:"<>|]', "_", raw_company)
+            task_no = re.sub(
+                r'[\\/*?:"<>|]', "_", str(data_dict.get("任务号", ""))
+            )
+
+            filename = (
+                f"{company_name}_{task_no}_评定报告.docx"
+                if task_no
+                else f"{company_name}_评定报告.docx"
+            )
+            zf.writestr(filename, doc_bytes)
+
+    zip_buffer.seek(0)
+    return zip_buffer.getvalue()
+
+
+def generate_word_bytes_batch(df):
+    """生成单文档全量汇总 Word 报告"""
     doc = Document()
     title = doc.add_heading("认证评定记录全量汇总报告", level=1)
     title.runs[0].font.color.rgb = RGBColor(0x1F, 0x49, 0x7D)
@@ -381,7 +402,7 @@ def generate_excel_bytes(df):
 
 
 # ==========================================
-# 3. Streamlit 主界面
+# 3. Streamlit 主界面 (保持原始 UI 不变)
 # ==========================================
 st.title("🛡️ 认证评定自动化解析与模版生成系统")
 
@@ -462,7 +483,7 @@ if excel_file is not None:
                 filtered_df["认证标准"].isin(selected_standard)
             ]
 
-        # 核心五大功能选项卡
+        # 核心五大功能选项卡 (保持原UI选项卡不变)
         tab_single, tab_batch, tab_data, tab_log, tab_chart = st.tabs(
             [
                 "🎯 单条记录生成 (Single Generate)",
@@ -474,7 +495,7 @@ if excel_file is not None:
         )
 
         # ----------------------------------------------------
-        # Tab 1: 单条记录生成 (Single Generate)
+        # Tab 1: 单条记录生成 (Single Generate) - 保持不变
         # ----------------------------------------------------
         with tab_single:
             st.subheader("🎯 选定单家企业生成/下载独立文档")
@@ -517,9 +538,9 @@ if excel_file is not None:
                     single_dict, template_bytes
                 )
                 template_status_label = (
-                    "已使用套用自定义 Word 模版"
+                    "已套用自定义 Word 模版"
                     if template_bytes
-                    else "已使用系统内置规范样式"
+                    else "已套用系统内置规范样式"
                 )
 
                 s_btn1.download_button(
@@ -541,28 +562,48 @@ if excel_file is not None:
                 st.warning("当前筛选条件下未找到任何记录。")
 
         # ----------------------------------------------------
-        # Tab 2: 批量导出 (Batch Export)
+        # Tab 2: 批量导出 (Batch Export) - 【已按要求全面升级修改】
         # ----------------------------------------------------
         with tab_batch:
-            st.subheader("📦 批量导出汇总报告与全量表格")
-            st.write(f"当前选定导出记录条数: **{len(filtered_df)}** 条")
+            st.subheader("📦 批量导出独立报告与数据汇总")
+            st.write(f"当前选中待处理的数据记录数: **{len(filtered_df)}** 条")
 
+            tpl_batch_info = (
+                "使用【自定义 Word 模板】批量生成"
+                if template_bytes
+                else "使用【标准模板格式】批量生成"
+            )
+
+            # 第一排：批量生成独立 Word 报告压缩包 + 批量导出 Excel
             b_btn1, b_btn2 = st.columns(2)
-            batch_excel_data = generate_excel_bytes(filtered_df)
+
+            batch_zip_data = generate_word_zip_batch(
+                filtered_df, template_bytes
+            )
             b_btn1.download_button(
+                label=f"📦 批量生成并下载独立 Word 报告包 (.zip) — {tpl_batch_info}",
+                data=batch_zip_data,
+                file_name="批量认证评定报告_Word独立文档包.zip",
+                mime="application/zip",
+            )
+
+            batch_excel_data = generate_excel_bytes(filtered_df)
+            b_btn2.download_button(
                 label="📥 导出批量 Excel 汇总表 (.xlsx)",
                 data=batch_excel_data,
                 file_name="认证评定记录_批量汇总.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
-            batch_word_data = generate_word_bytes_batch(
-                filtered_df, template_bytes
-            )
-            b_btn2.download_button(
-                label="📥 导出批量 Word 汇总报告 (.docx)",
-                data=batch_word_data,
-                file_name="认证评定汇总报告.docx",
+            st.markdown("---")
+
+            # 第二排（辅助导出）：导出单文档长表汇总 Word
+            st.write("📌 **备用选项：**")
+            batch_word_summary_data = generate_word_bytes_batch(filtered_df)
+            st.download_button(
+                label="📄 下载单文档全量汇总 Word 报告 (.docx)",
+                data=batch_word_summary_data,
+                file_name="认证评定全量汇总长文档.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
 
