@@ -6,14 +6,18 @@ import streamlit as st
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 
-st.set_page_config(page_title="认证评定记录全量解析系统", layout="wide")
+st.set_page_config(
+    page_title="认证评定记录全量解析与模版生成系统", layout="wide"
+)
 
 
+# ==========================================
+# 1. 核心解析引擎 (四表联动与异常修复)
+# ==========================================
 def parse_and_fix_excel(file_buffer):
     """四表联动解析与数据清洗核心引擎 (Sheet1 ~ Sheet4)"""
     xls = pd.ExcelFile(file_buffer)
 
-    # 1. 加载所有工作表
     df1 = pd.read_excel(xls, sheet_name="Sheet1")
     df2 = (
         pd.read_excel(xls, sheet_name="Sheet2")
@@ -31,7 +35,6 @@ def parse_and_fix_excel(file_buffer):
         else pd.DataFrame()
     )
 
-    # 2. 预处理副表表头与索引
     if not df3.empty:
         df3 = df3.rename(
             columns={
@@ -54,7 +57,6 @@ def parse_and_fix_excel(file_buffer):
     master_list = []
     anomaly_log = []
 
-    # 3. 逐行联合解析
     for idx, row in df1.iterrows():
         task_no = str(row.get("任务号", "")).strip()
 
@@ -74,7 +76,7 @@ def parse_and_fix_excel(file_buffer):
             else pd.Series()
         )
 
-        # 公司名称提取与邮箱修复
+        # 公司名称提取与邮箱污染修正
         s1_company = str(row.get("客户名称 Client Name", "")).strip()
         s2_company = (
             str(row2.get("企业中文名字", row2.get("企业名称", ""))).strip()
@@ -126,7 +128,7 @@ def parse_and_fix_excel(file_buffer):
         if company_en.lower() in ["nan", "none", "null"]:
             company_en = ""
 
-        # 审核团队组合 (组长 + 组员)
+        # 审核团队组合
         lead = str(
             row.get("审核组长", row2.get("组长", "") if not row2.empty else "")
         ).strip()
@@ -161,7 +163,7 @@ def parse_and_fix_excel(file_buffer):
                 real_address if real_address.lower() != "nan" else "未填写"
             )
 
-        # 认证范围
+        # 认证范围与标准
         scope = str(row.get("认证范围", "")).strip()
         if not scope or scope.lower() in ["nan", "none", "null"]:
             scope = (
@@ -170,7 +172,6 @@ def parse_and_fix_excel(file_buffer):
         if scope.lower() in ["nan", "none", "null"]:
             scope = ""
 
-        # 标准类型
         standard = (
             str(row2.get("标准", "")).strip() if not row2.empty else "ISO/IATF"
         )
@@ -198,7 +199,7 @@ def parse_and_fix_excel(file_buffer):
                 else ""
             )
 
-        # 附加属性
+        # 其它列
         code = (
             str(row2.get("专业代码", "")).strip() if not row2.empty else ""
         )
@@ -263,11 +264,77 @@ def parse_and_fix_excel(file_buffer):
     return pd.DataFrame(master_list), pd.DataFrame(anomaly_log)
 
 
-def generate_word_bytes(df):
-    """导出排版精美的 Word 报告文件"""
-    doc = Document()
+# ==========================================
+# 2. Word 模板填充引擎 (支持用户自定义模板)
+# ==========================================
+def fill_word_template_single(data_dict, template_bytes=None):
+    """为单条记录填充 Word 模板（若无模板则生成标准卡片）"""
+    if template_bytes:
+        # 使用用户上传的自定义 Word 模板填充
+        doc = Document(io.BytesIO(template_bytes))
 
-    # 标题
+        def replace_in_paragraphs(paragraphs, data):
+            for p in paragraphs:
+                for k, v in data.items():
+                    tag = f"{{{{{k}}}}}"  # {{字段名}}
+                    if tag in p.text:
+                        p.text = p.text.replace(
+                            tag, str(v) if pd.notna(v) and v != "" else ""
+                        )
+
+        replace_in_paragraphs(doc.paragraphs, data_dict)
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    replace_in_paragraphs(cell.paragraphs, data_dict)
+
+    else:
+        # 未上传模板时，使用系统内置默认文档布局
+        doc = Document()
+        doc.add_heading(f"认证评定单项报告 - {data_dict['公司中文名']}", level=1)
+
+        p = doc.add_paragraph()
+        p.add_run("• 公司中文名：").bold = True
+        p.add_run(f"{data_dict['公司中文名']}\n")
+
+        p.add_run("• 公司英文名：").bold = True
+        p.add_run(f"{data_dict['公司英文名']}\n")
+
+        p.add_run("• 任务号：").bold = True
+        p.add_run(f"{data_dict['任务号']}   |   ")
+        p.add_run("合同号：").bold = True
+        p.add_run(f"{data_dict['合同号']}\n")
+
+        p.add_run("• 认证标准：").bold = True
+        p.add_run(f"{data_dict['认证标准']}   |   ")
+        p.add_run("审核类型：").bold = True
+        p.add_run(f"{data_dict['审核类型']}\n")
+
+        p.add_run("• 审核团队：").bold = True
+        p.add_run(f"{data_dict['审核团队']}   |   ")
+        p.add_run("评定人员：").bold = True
+        p.add_run(f"{data_dict['评定人员']}\n")
+
+        p.add_run("• 认证结论：").bold = True
+        r_dec = p_body = p.add_run(f"{data_dict['认证结论']}")
+        r_dec.bold = True
+        p.add_run(f"   |   结论日期：{data_dict['结论日期']}\n")
+
+        p.add_run("• 审核地址：").bold = True
+        p.add_run(f"{data_dict['审核地址']}\n")
+
+        p.add_run("• 认证范围：").bold = True
+        p.add_run(f"{data_dict['认证范围']}")
+
+    target_stream = io.BytesIO()
+    doc.save(target_stream)
+    target_stream.seek(0)
+    return target_stream.getvalue()
+
+
+def generate_word_bytes_batch(df, template_bytes=None):
+    """批量导出所有记录的汇总 Word 报告"""
+    doc = Document()
     title = doc.add_heading("认证评定记录全量汇总报告", level=1)
     title.runs[0].font.color.rgb = RGBColor(0x1F, 0x49, 0x7D)
 
@@ -280,42 +347,19 @@ def generate_word_bytes(df):
         if row["公司英文名"]:
             r_en = p_head.add_run(f"({row['公司英文名']})")
             r_en.italic = True
-            r_en.font.color.rgb = RGBColor(0x59, 0x59, 0x59)
 
         p_body = doc.add_paragraph()
         p_body.paragraph_format.left_indent = Inches(0.2)
-        p_body.paragraph_format.line_spacing = 1.15
-
         p_body.add_run("• 任务号：").bold = True
-        p_body.add_run(f"{row['任务号']}   |   ")
-        p_body.add_run("合同号：").bold = True
-        p_body.add_run(f"{row['合同号'] if row['合同号'] else '无'}\n")
-
+        p_body.add_run(f"{row['任务号']}   |   合同号：{row['合同号']}\n")
         p_body.add_run("• 认证标准：").bold = True
-        p_body.add_run(f"{row['认证标准']}   |   ")
-        p_body.add_run("审核类型：").bold = True
-        p_body.add_run(f"{row['审核类型']}\n")
-
+        p_body.add_run(f"{row['认证标准']}   |   审核类型：{row['审核类型']}\n")
         p_body.add_run("• 审核团队：").bold = True
-        p_body.add_run(f"{row['审核团队']}   |   ")
-        p_body.add_run("评定人员：").bold = True
-        p_body.add_run(f"{row['评定人员']}\n")
-
+        p_body.add_run(f"{row['审核团队']}   |   评定人员：{row['评定人员']}\n")
         p_body.add_run("• 认证结论：").bold = True
-        r_dec = p_body.add_run(f"{row['认证结论']}")
-        r_dec.bold = True
-        r_dec.font.color.rgb = (
-            RGBColor(0x00, 0x80, 0x00)
-            if "通过" in row["认证结论"]
-            else RGBColor(0xC0, 0x00, 0x00)
-        )
-        p_body.add_run(
-            f"   |   结论日期：{row['结论日期'] if row['结论日期'] else '待定'}\n"
-        )
-
+        p_body.add_run(f"{row['认证结论']}   |   结论日期：{row['结论日期']}\n")
         p_body.add_run("• 审核地址：").bold = True
         p_body.add_run(f"{row['审核地址']}\n")
-
         p_body.add_run("• 认证范围：").bold = True
         p_body.add_run(f"{row['认证范围']}")
 
@@ -328,7 +372,7 @@ def generate_word_bytes(df):
 
 
 def generate_excel_bytes(df):
-    """导出包含完整 18 维度数据的 Excel 文件"""
+    """导出 Excel 二进制流"""
     target_stream = io.BytesIO()
     with pd.ExcelWriter(target_stream, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="认证评定解析全量表")
@@ -336,19 +380,44 @@ def generate_excel_bytes(df):
     return target_stream.getvalue()
 
 
-# ---------------- Streamlit UI 界面 ----------------
-st.title("🛡️ 认证评定记录自动化全量解析与修复系统")
+# ==========================================
+# 3. Streamlit 主界面
+# ==========================================
+st.title("🛡️ 认证评定自动化解析与模版生成系统")
 
-uploaded_file = st.file_uploader(
-    "请上传认证评定记录文件 (支持 .xlsx, .xls)", type=["xlsx", "xls"]
-)
+# 顶部双列上传组件
+up_col1, up_col2 = st.columns(2)
+with up_col1:
+    excel_file = st.file_uploader(
+        "1. 上传认证评定 Excel 数据文件 (.xlsx / .xls)",
+        type=["xlsx", "xls"],
+    )
+with up_col2:
+    template_file = st.file_uploader(
+        "2. (可选) 上传自定义 Word 模板 (.docx)", type=["docx"]
+    )
+    with st.expander("💡 提示：自定义模板占位符写法"):
+        st.markdown(
+            """
+        在 Word 模板中可直接输入以下标签，系统自动替换对应文本：
+        - `{{公司中文名}}` 、 `{{公司英文名}}`
+        - `{{任务号}}` 、 `{{合同号}}`
+        - `{{审核团队}}` 、 `{{评定人员}}`
+        - `{{认证标准}}` 、 `{{审核类型}}`
+        - `{{审核地址}}` 、 `{{认证范围}}`
+        - `{{认证结论}}` 、 `{{结论日期}}`
+        """
+        )
 
-if uploaded_file is not None:
+# 读取模板文件流
+template_bytes = template_file.getvalue() if template_file else None
+
+if excel_file is not None:
     try:
         with st.spinner("正在执行多表深度匹配、数据脱敏与自动修复..."):
-            df_master, df_anomalies = parse_and_fix_excel(uploaded_file)
+            df_master, df_anomalies = parse_and_fix_excel(excel_file)
 
-        # 核心指标显示
+        # 核心指标
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("总解析记录数", f"{len(df_master)} 条")
         col2.metric("邮箱污染修复数", f"{len(df_anomalies)} 处")
@@ -363,7 +432,7 @@ if uploaded_file is not None:
 
         st.markdown("---")
 
-        # 搜索与筛选控制栏
+        # 侧边栏过滤
         st.sidebar.header("🔍 数据筛选与检索")
         search_kw = st.sidebar.text_input("搜索企业名称或任务号:")
         selected_decision = st.sidebar.multiselect(
@@ -377,7 +446,6 @@ if uploaded_file is not None:
             default=[],
         )
 
-        # 应用筛选逻辑
         filtered_df = df_master.copy()
         if search_kw:
             filtered_df = filtered_df[
@@ -394,19 +462,120 @@ if uploaded_file is not None:
                 filtered_df["认证标准"].isin(selected_standard)
             ]
 
-        # 选项卡视图
-        tab1, tab2, tab3 = st.tabs(
+        # 核心五大功能选项卡
+        tab_single, tab_batch, tab_data, tab_log, tab_chart = st.tabs(
             [
-                "📋 完整数据解析结果",
+                "🎯 单条记录生成 (Single Generate)",
+                "📦 批量数据导出 (Batch Export)",
+                "📋 完整解析全量表",
                 "⚠️ 异常数据修复日志",
                 "📊 统计图表分析",
             ]
         )
 
-        with tab1:
+        # ----------------------------------------------------
+        # Tab 1: 单条记录生成 (Single Generate)
+        # ----------------------------------------------------
+        with tab_single:
+            st.subheader("🎯 选定单家企业生成/下载独立文档")
+            company_list = filtered_df["公司中文名"].tolist()
+
+            if company_list:
+                selected_company = st.selectbox(
+                    "请选择目标企业:", options=company_list
+                )
+                single_row = filtered_df[
+                    filtered_df["公司中文名"] == selected_company
+                ].iloc[0]
+                single_dict = single_row.to_dict()
+
+                # 单条记录预览卡片
+                st.info(
+                    f"**已选中记录**：{single_dict['公司中文名']} (任务号: {single_dict['任务号']})"
+                )
+
+                card_col1, card_col2 = st.columns(2)
+                with card_col1:
+                    st.write(f"**公司英文名**: {single_dict['公司英文名']}")
+                    st.write(f"**合同号**: {single_dict['合同号']}")
+                    st.write(f"**审核团队**: {single_dict['审核团队']}")
+                    st.write(f"**评定人员**: {single_dict['评定人员']}")
+                    st.write(f"**认证标准**: {single_dict['认证标准']}")
+                with card_col2:
+                    st.write(f"**审核类型**: {single_dict['审核类型']}")
+                    st.write(f"**认证结论**: {single_dict['认证结论']}")
+                    st.write(f"**结论日期**: {single_dict['结论日期']}")
+                    st.write(f"**审核地址**: {single_dict['审核地址']}")
+                    st.write(f"**认证范围**: {single_dict['认证范围']}")
+
+                st.markdown("---")
+
+                # 生成单条 Word / Excel 按钮
+                s_btn1, s_btn2 = st.columns(2)
+
+                single_word_bytes = fill_word_template_single(
+                    single_dict, template_bytes
+                )
+                template_status_label = (
+                    "已使用套用自定义 Word 模版"
+                    if template_bytes
+                    else "已使用系统内置规范样式"
+                )
+
+                s_btn1.download_button(
+                    label=f"📄 下载该单条记录 Word 报告 ({template_status_label})",
+                    data=single_word_bytes,
+                    file_name=f"{single_dict['公司中文名']}_评定记录.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+
+                single_df = pd.DataFrame([single_dict])
+                single_excel_bytes = generate_excel_bytes(single_df)
+                s_btn2.download_button(
+                    label="📊 下载该单条记录 Excel 表格",
+                    data=single_excel_bytes,
+                    file_name=f"{single_dict['公司中文名']}_评定记录.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            else:
+                st.warning("当前筛选条件下未找到任何记录。")
+
+        # ----------------------------------------------------
+        # Tab 2: 批量导出 (Batch Export)
+        # ----------------------------------------------------
+        with tab_batch:
+            st.subheader("📦 批量导出汇总报告与全量表格")
+            st.write(f"当前选定导出记录条数: **{len(filtered_df)}** 条")
+
+            b_btn1, b_btn2 = st.columns(2)
+            batch_excel_data = generate_excel_bytes(filtered_df)
+            b_btn1.download_button(
+                label="📥 导出批量 Excel 汇总表 (.xlsx)",
+                data=batch_excel_data,
+                file_name="认证评定记录_批量汇总.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+            batch_word_data = generate_word_bytes_batch(
+                filtered_df, template_bytes
+            )
+            b_btn2.download_button(
+                label="📥 导出批量 Word 汇总报告 (.docx)",
+                data=batch_word_data,
+                file_name="认证评定汇总报告.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+
+        # ----------------------------------------------------
+        # Tab 3: 数据表格视图
+        # ----------------------------------------------------
+        with tab_data:
             st.dataframe(filtered_df, use_container_width=True)
 
-        with tab2:
+        # ----------------------------------------------------
+        # Tab 4: 修复日志视图
+        # ----------------------------------------------------
+        with tab_log:
             if not df_anomalies.empty:
                 st.warning(
                     f"系统共自动识别并修复了 {len(df_anomalies)} 项错位及邮箱污染数据："
@@ -415,37 +584,19 @@ if uploaded_file is not None:
             else:
                 st.success("数据质量良好，未检测到邮箱污染或明显错位字段！")
 
-        with tab3:
-            col_chart1, col_chart2 = st.columns(2)
-            with col_chart1:
+        # ----------------------------------------------------
+        # Tab 5: 图表视图
+        # ----------------------------------------------------
+        with tab_chart:
+            c1, c2 = st.columns(2)
+            with c1:
                 st.subheader("认证结论分布")
                 st.bar_chart(filtered_df["认证结论"].value_counts())
-            with col_chart2:
+            with c2:
                 st.subheader("认证标准分布")
                 st.bar_chart(filtered_df["认证标准"].value_counts())
-
-        # 下载按钮区域
-        st.markdown("---")
-        st.subheader("📥 导出导出报告与数据")
-        btn_col1, btn_col2 = st.columns(2)
-
-        excel_data = generate_excel_bytes(filtered_df)
-        btn_col1.download_button(
-            label="下载全量修复后的 Excel 表格 (.xlsx)",
-            data=excel_data,
-            file_name="认证评定记录_全量修复版.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
-        word_data = generate_word_bytes(filtered_df)
-        btn_col2.download_button(
-            label="导出规范排版的 Word 总结报告 (.docx)",
-            data=word_data,
-            file_name="认证评定汇总报告.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        )
 
     except Exception as e:
         st.error(f"处理文件时发生错误，请检查上传的文件格式: {str(e)}")
 else:
-    st.info("👈 请在左上方选择并上传您的 Excel 评定文件以启动解析。")
+    st.info("👈 请在左上方上传您的 Excel 文件，可同时选择上传 Word 模版。")
