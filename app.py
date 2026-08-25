@@ -296,7 +296,7 @@ def parse_and_fix_excel(file_buffer):
         if _is_empty(task_no) and not df2.empty and "任务号" in df2.columns:
             s1_company = _get_col(row, "客户名称 Client Name", "公司名称", default="")
             if s1_company:
-                mask = df2["企业名称"].astype(str).str.contains(s1_company[:8], na=False) | df2["企业中文名字"].astype(str).str.contains(s1_company[:8], na=False)
+                mask = df2["企业名称"].astype(str).str.contains(s1_company[:8], na=False, regex=False) | df2["企业中文名字"].astype(str).str.contains(s1_company[:8], na=False, regex=False)
                 match = df2[mask]
                 if not match.empty:
                     task_no = str(match.iloc[0]["任务号"]).strip()
