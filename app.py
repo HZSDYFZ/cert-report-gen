@@ -1,8 +1,17 @@
 import sys, io, re, zipfile
 from datetime import datetime
 import streamlit as st
-import openpyxl
-from docx import Document
+
+# 尝试导入 openpyxl 和 docx，缺失时给予友好提示
+try:
+    import openpyxl
+except ImportError:
+    st.error("❌ 缺少 openpyxl 依赖包，请在终端运行: pip install openpyxl")
+
+try:
+    from docx import Document
+except ImportError:
+    st.error("❌ 缺少 python-docx 依赖包，请在终端运行: pip install python-docx")
 
 # 页面基础配置及标题设置
 st.set_page_config(
@@ -164,23 +173,29 @@ def fill_report(doc, fields):
 
 # ==================== BATCH GENERATION 模式 ====================
 
+def safe_get_cell(row_vals, idx):
+    """安全读取元素，防止 IndexError"""
+    if idx < len(row_vals) and row_vals[idx] is not None:
+        return row_vals[idx]
+    return ''
+
 def batch_read_row(row_tuple):
-    """安全地解析单元格数据，补齐不足的列"""
-    vals = list(row_tuple) + [''] * 20  # 自动补齐列表长度，防止 IndexError
+    """防崩安全的 Excel 单元格解析"""
+    vals = list(row_tuple) if row_tuple else []
     
-    company = clean_text(vals[2])
-    leader_raw = clean_text(vals[3])
+    company = clean_text(safe_get_cell(vals, 2))
+    leader_raw = clean_text(safe_get_cell(vals, 3))
     leader = leader_raw.split('+')[0].strip() if leader_raw else ''
     
     return {
         'company': company,
         'leader': leader,
-        'auditType': clean_text(vals[4]),
-        'address': clean_text(vals[6]),
-        'scope': clean_text(vals[7]),
-        'taskNo': clean_text(vals[8]),
-        'decision': clean_text(vals[10]),
-        'date': format_date(vals[11])
+        'auditType': clean_text(safe_get_cell(vals, 4)),
+        'address': clean_text(safe_get_cell(vals, 6)),
+        'scope': clean_text(safe_get_cell(vals, 7)),
+        'taskNo': clean_text(safe_get_cell(vals, 8)),
+        'decision': clean_text(safe_get_cell(vals, 10)),
+        'date': format_date(safe_get_cell(vals, 11))
     }
 
 def batch_get_conclusion_idx(atype, decision):
@@ -189,24 +204,23 @@ def batch_get_conclusion_idx(atype, decision):
     is_surv = ('监' in at or '监督' in at)
     
     if '转移' in at:
-        return 2  # 通过，可换发证书
+        return 2
     elif is_surv:
         if '不换证' in dec or '保持' in dec:
-            return 4  # 通过，不换证
+            return 4
         elif '换发' in dec or '换证' in dec:
-            return 5  # 通过，可换发新的认证证书
-        return 4  # 监督审核默认不换证
+            return 5
+        return 4
     elif '特殊' in at:
         return 3 if ('换发' in dec or '换证' in dec) else 0
-    return 0  # 默认 (初审/二阶段/再认证): 通过，可发证
+    return 0
 
 def replace_field_in_run(para, keyword, new_value):
-    """把段落中的占位符替换为新值，清理多余占位字符"""
+    """防混淆覆盖替换工具函数"""
     if not new_value or keyword not in para.text:
         return
     for run in para.runs:
         if keyword in run.text:
-            # 使用正则精准替换冒号后面的内容
             if re.search(f'{keyword}[：:]', run.text):
                 run.text = re.sub(f'{keyword}[：:]\s*.*', f'{keyword}：{new_value}', run.text)
             else:
@@ -226,7 +240,6 @@ def batch_fill_report_fast(tpl_doc_bytes, fields):
     tn_upper = str(taskNo).upper()
     has_ts, has_er = 'TS' in tn_upper, 'ER' in tn_upper
 
-    # 替换正文段落
     for para in doc.paragraphs:
         replace_field_in_run(para, '公司名称', company)
         replace_field_in_run(para, '任务号', taskNo)
@@ -236,7 +249,6 @@ def batch_fill_report_fast(tpl_doc_bytes, fields):
         replace_field_in_run(para, '认证范围', scope)
         replace_field_in_run(para, '日期', date_val)
 
-    # 替换表格中的单元格
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
@@ -252,7 +264,6 @@ def batch_fill_report_fast(tpl_doc_bytes, fields):
                     replace_field_in_run(para, '认证范围', scope)
                     replace_field_in_run(para, '日期', date_val)
 
-                    # 体系标准替换
                     if 'IATF16949' in full_p or 'ISO9001' in full_p:
                         new_t = para.text
                         if has_ts: new_t = new_t.replace(CHK_EMPTY + ' IATF16949', CHK_FILLED + ' IATF16949').replace(CHK_EMPTY + 'IATF16949', CHK_FILLED + 'IATF16949')
@@ -261,7 +272,6 @@ def batch_fill_report_fast(tpl_doc_bytes, fields):
                             for r in para.runs: r.text = ''
                             para.runs[0].text = new_t
 
-                    # 审核类型替换
                     if auditType and ('初审' in full_p or '监审' in full_p or '再认证' in full_p or '特殊审核' in full_p):
                         new_t = para.text
                         if '二阶段' in auditType or '初审' in auditType or '一阶段' in auditType: 
@@ -280,7 +290,6 @@ def batch_fill_report_fast(tpl_doc_bytes, fields):
     doc.save(out_buf)
     out_buf.seek(0)
 
-    # 修改 XML 勾选认证决定 FORMCHECKBOX
     con_idx = batch_get_conclusion_idx(auditType, decision)
     with zipfile.ZipFile(out_buf, 'r') as z:
         content = {name: z.read(name) for name in z.namelist()}
@@ -328,17 +337,14 @@ else:
 
     if ef and tf:
         try:
-            # 彻底去掉 read_only=True，防止 openpyxl 遗漏数据行或对非完整行做截断
             wb = openpyxl.load_workbook(io.BytesIO(ef.getvalue()), data_only=True)
             ws = wb.active
             rows_data = []
             
-            # 从第 2 行开始逐行读取
             for row in ws.iter_rows(min_row=2, values_only=True):
-                # 只要该行不为空，且能提取到有效公司名称
-                if row:
+                if row and any(row):  # 确保不是全空行
                     item = batch_read_row(row)
-                    if item['company']:
+                    if item['company']:  # 只保留能提取到公司名称的行
                         rows_data.append(item)
             wb.close()
 
