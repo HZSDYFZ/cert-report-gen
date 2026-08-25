@@ -432,125 +432,37 @@ def extract_form_fields(doc):
         fields.setdefault(k, "")
     return fields
 
-st.set_page_config(page_title="认证评定报告生成器", page_icon="📋", layout="wide")
-st.title("📋 认证评定报告生成器")
-mode = st.radio("选择模式", ["单条报告生成 (FORM6101)", "批量生成 (Excel)"], key="mode")
 
-if mode == "单条报告生成 (FORM6101)":
-    st.subheader("单条报告生成")
-    col1, col2 = st.columns(2)
-    with col1:
-        form_file = st.file_uploader("上传 FORM6101", type=["docx"], key="form_up")
-    with col2:
-        tpl_file = st.file_uploader("上传报告模版", type=["docx"], key="tpl_up")
-    if form_file and tpl_file:
-        if "form_fields" not in st.session_state or st.session_state.get("form_name") != form_file.name:
-            form_bytes = form_file.read()
-            st.session_state.form_bytes = form_bytes
-            st.session_state.form_name = form_file.name
-            st.session_state.form_fields = extract_form_fields(Document(io.BytesIO(form_bytes)))
-        if "tpl_bytes" not in st.session_state or st.session_state.get("tpl_name") != tpl_file.name:
-            st.session_state.tpl_bytes = tpl_file.read()
-            st.session_state.tpl_name = tpl_file.name
-        fields = st.session_state.form_fields
-        st.info("提取字段: 公司=%s, 任务号=%s, 组长=%s" % (str(fields.get("company", ""))[:25], fields.get("taskNo", ""), fields.get("leader", "")))
-        if st.button("生成报告", type="primary", key="gen_single"):
-            with st.spinner("生成中..."):
-                try:
-                    doc = Document(io.BytesIO(st.session_state.tpl_bytes))
-                    doc = fill_report(doc, fields)
-                    out = io.BytesIO(); doc.save(out)
-                    st.download_button("📥 下载 Word 报告", data=out.getvalue(),
-                        file_name="%s_评定报告.docx" % fields.get("company", "报告"),
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-                except Exception as e:
-                    st.error("生成失败: " + str(e))
+st.set_page_config(page_title="Cert Report Gen", page_icon="📋", layout="wide")
+st.title("Cert Report Generator")
 
-else:
-    st.subheader("批量生成")
-    col1, col2 = st.columns(2)
-    with col1:
-        excel_file = st.file_uploader("上传 Excel 数据", type=["xlsx"], key="batch_exl_up")
-    with col2:
-        tpl_file = st.file_uploader("上传报告模版", type=["docx"], key="batch_tpl_up")
-    if excel_file and tpl_file:
-        state_key = "batch_expl"
-        if state_key not in st.session_state or st.session_state.get("exc_name") != excel_file.name or st.session_state.get("b_tpl_name") != tpl_file.name:
+st.subheader("Upload Files")
+col1, col2 = st.columns(2)
+with col1:
+    form_file = st.file_uploader("Upload FORM6101", type=["docx"], key="form_up")
+with col2:
+    tpl_file = st.file_uploader("Upload Report Template", type=["docx"], key="tpl_up")
+if form_file and tpl_file:
+    if "form_fields" not in st.session_state or st.session_state.get("form_name") != form_file.name:
+        form_bytes = form_file.read()
+        st.session_state.form_bytes = form_bytes
+        st.session_state.form_name = form_file.name
+        st.session_state.form_fields = extract_form_fields(Document(io.BytesIO(form_bytes)))
+    if "tpl_bytes" not in st.session_state or st.session_state.get("tpl_name") != tpl_file.name:
+        st.session_state.tpl_bytes = tpl_file.read()
+        st.session_state.tpl_name = tpl_file.name
+    fields = st.session_state.form_fields
+    st.info("Extracted: company=%s, taskNo=%s, leader=%s" % (str(fields.get("company", ""))[:25], fields.get("taskNo", ""), fields.get("leader", "")))
+    if st.button("Generate Report", type="primary", key="gen_single"):
+        with st.spinner("Generating..."):
             try:
-                with st.spinner("解析 Excel 数据..."):
-                    df, anomaly_df = parse_and_fix_excel(excel_file)
-                st.session_state.batch_df = df
-                st.session_state.batch_anomaly = anomaly_df
-                st.session_state.batch_tpl_bytes = tpl_file.read()
-                st.session_state.exc_name = excel_file.name
-                st.session_state.b_tpl_name = tpl_file.name
-                st.session_state.batch_step = 0
-                st.session_state.batch_processed = 0
-                st.session_state.batch_files = []
-                st.session_state.curr_zip = None
+                doc = Document(io.BytesIO(st.session_state.tpl_bytes))
+                doc = fill_report(doc, fields)
+                out = io.BytesIO(); doc.save(out)
+                st.download_button("Download Word Report", data=out.getvalue(),
+                    file_name="%s_Report.docx" % fields.get("company", "report"),
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
             except Exception as e:
-                st.error("解析 Excel 失败: " + str(e))
-                st.stop()
-        df = st.session_state.batch_df
-        anomaly_df = st.session_state.batch_anomaly
-        template_bytes = st.session_state.batch_tpl_bytes
-        st.success("解析完成！共 %d 条有效记录，%d 条异常记录" % (len(df), len(anomaly_df)))
-        if not df.empty:
-            tab_single, tab_batch = st.tabs(["单条记录生成", "批量生成"])
-            with tab_single:
-                st.subheader("单条记录生成")
-                selected = st.selectbox("选择记录", df["任务号"].tolist())
-                if selected:
-                    sel_row = df[df["任务号"] == selected].iloc[0]
-                    with st.expander("查看数据详情"):
-                        st.json(sel_row.to_dict())
-                    word_bytes = generate_word_zip_batch(df[df["任务号"] == selected], template_bytes)
-                    st.download_button("📥 下载 Word 报告", data=word_bytes,
-                        file_name="%s_评定报告.docx" % sel_row["公司中文名"],
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-            with tab_batch:
-                st.subheader("批量生成 (每次20个)")
-                st.write("当前处理进度: **%d** / %d 条" % (st.session_state.batch_processed, len(df)))
-                if st.button("开始生成 (20个)", key="batch_start"):
-                    with st.spinner("生成中..."):
-                        step = st.session_state.batch_step
-                        start_idx = step * 20
-                        end_idx = min(start_idx + 20, len(df))
-                        batch_df = df.iloc[start_idx:end_idx]
-                        zip_data = generate_word_zip_batch(batch_df, template_bytes)
-                        st.session_state.batch_files.extend([zip_data])
-                        st.session_state.batch_step += 1
-                        st.session_state.batch_processed = end_idx
-                        st.session_state.curr_zip = zip_data
-                        st.success("已生成 %d / %d 条报告" % (end_idx, len(df)))
-                        st.download_button("📥 下载本批报告 (.zip)", data=zip_data,
-                            file_name="reports_batch_%d.zip" % (step + 1), mime="application/zip")
-                        if end_idx >= len(df):
-                            st.success("全部报告已生成完毕！")
-                            if len(st.session_state.batch_files) > 1:
-                                all_zip = io.BytesIO()
-                                with zipfile.ZipFile(all_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-                                    for zd in st.session_state.batch_files:
-                                        all_zip.write(zd)
-                                all_zip.seek(0)
-                                st.download_button("📥 下载全部报告 (.zip)", data=all_zip.getvalue(),
-                                    file_name="all_reports.zip", mime="application/zip")
-                if st.button("清除并重试", key="batch_clear"):
-                    st.session_state.batch_step = 0
-                    st.session_state.batch_processed = 0
-                    st.session_state.batch_files = []
-                    st.session_state.curr_zip = None
-                    st.rerun()
-                excel_data = generate_excel_bytes(df)
-                st.download_button("📥 导出 Excel 汇总", data=excel_data,
-                    file_name="认证评定记录_汇总.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        if not anomaly_df.empty:
-            st.warning("发现 %d 条数据异常，请查看:" % len(anomaly_df))
-            st.dataframe(anomaly_df)
-    elif excel_file or tpl_file:
-        st.warning("请同时上传 Excel 数据和报告模版")
-    else:
-        st.info("请上传 Excel 数据文件和报告模版")
+                st.error("Error: " + str(e))
 
 st.caption("Cert Report Generator v3.0")
-
