@@ -224,80 +224,149 @@ def fill_report(doc, fields):
         out.seek(0); doc = Document(out)
     return doc
 
+
+def _get_col(row, *names, default=""):
+    for name in names:
+        if name in row.index:
+            v = row[name]
+            if pd.notna(v):
+                s = str(v).strip()
+                if s and s.lower() not in ["nan","none","null",""]:
+                    return s
+    return default
+
+def _is_empty(s):
+    s = str(s).strip() if s is not None else ""
+    return not s or s.lower() in ["nan","none","null",""]
+
+def _match_row(df, task_no):
+    if df.empty or "任务号" not in df.columns:
+        return pd.Series()
+    if not task_no or task_no not in df["任务号"].values:
+        return pd.Series()
+    return df[df["任务号"] == task_no].iloc[0]
+
+def _is_empty_series(r):
+    return isinstance(r, pd.Series) and r.empty
+
 def parse_and_fix_excel(file_buffer):
     xls = pd.ExcelFile(file_buffer)
-    df1 = pd.read_excel(xls, sheet_name='Sheet1')
-    df2 = pd.read_excel(xls, sheet_name='Sheet2') if 'Sheet2' in xls.sheet_names else pd.DataFrame()
-    df3 = pd.read_excel(xls, sheet_name='Sheet3') if 'Sheet3' in xls.sheet_names else pd.DataFrame()
-    df4 = pd.read_excel(xls, sheet_name='Sheet4') if 'Sheet4' in xls.sheet_names else pd.DataFrame()
+    df1 = pd.read_excel(xls, sheet_name="Sheet1")
+    df2 = pd.read_excel(xls, sheet_name="Sheet2") if "Sheet2" in xls.sheet_names else pd.DataFrame()
+    df3 = pd.read_excel(xls, sheet_name="Sheet3") if "Sheet3" in xls.sheet_names else pd.DataFrame()
+    df4 = pd.read_excel(xls, sheet_name="Sheet4") if "Sheet4" in xls.sheet_names else pd.DataFrame()
     if not df3.empty:
-        df3 = df3.rename(columns={df3.columns[0]: '任务号', 'Observations': 'Sheet3_结论', 'Date': 'Sheet3_日期'})
-        df3 = df3.drop_duplicates(subset=['任务号'], keep='first')
+        old_cols = list(df3.columns)
+        if len(old_cols) >= 1 and old_cols[0] not in ["任务号"]:
+            df3 = df3.rename(columns={old_cols[0]: "任务号"})
+        if "Observations" not in df3.columns and len(old_cols) >= 2:
+            df3 = df3.rename(columns={old_cols[1]: "Sheet3_结论"})
+        if "Date" not in df3.columns and len(old_cols) >= 3:
+            df3 = df3.rename(columns={old_cols[2]: "Sheet3_日期"})
+        df3 = df3.drop_duplicates(subset=["任务号"], keep="first")
     if not df4.empty:
-        df4.columns = df4.iloc[0]
-        df4 = df4[1:].reset_index(drop=True)
-        df4 = df4.rename(columns={'File number(s)': '任务号'})
-        df4 = df4.drop_duplicates(subset=['任务号'], keep='first')
-    if not df2.empty and '任务号' in df2.columns:
-        df2 = df2.drop_duplicates(subset=['任务号'], keep='first')
+        header_idx = 0
+        while header_idx < len(df4) and df4.iloc[header_idx].isna().all():
+            header_idx += 1
+        if header_idx < len(df4):
+            header_row = df4.iloc[header_idx]
+            new_cols = {}
+            for j, hc in enumerate(header_row):
+                if pd.notna(hc):
+                    new_cols[j] = str(hc).strip()
+            if "File number(s)" in new_cols.values() and "任务号" not in new_cols.values():
+                for j, hc in enumerate(header_row):
+                    if pd.notna(hc) and str(hc).strip() == "File number(s)":
+                        new_cols[j] = "任务号"
+                        break
+            df4 = df4.rename(columns=new_cols)
+            df4 = df4[header_idx + 1:].reset_index(drop=True)
+        if "任务号" in df4.columns:
+            df4 = df4.drop_duplicates(subset=["任务号"], keep="first")
+    if not df2.empty and "任务号" in df2.columns:
+        df2 = df2.drop_duplicates(subset=["任务号"], keep="first")
+    has_task_in_s1 = "任务号" in df1.columns
     master_list = []
     anomaly_log = []
     for idx, row in df1.iterrows():
-        task_no = str(row.get('任务号', '')).strip()
-        row2 = df2[df2['任务号'] == task_no].iloc[0] if (not df2.empty and task_no in df2['任务号'].values) else pd.Series()
-        row3 = df3[df3['任务号'] == task_no].iloc[0] if (not df3.empty and task_no in df3['任务号'].values) else pd.Series()
-        row4 = df4[df4['任务号'] == task_no].iloc[0] if (not df4.empty and task_no in df4['任务号'].values) else pd.Series()
-        s1_company = str(row.get('客户名称 Client Name', '')).strip()
-        s2_company = str(row2.get('企业中文名字', row2.get('企业名称', ''))).strip() if not row2.empty else ''
-        s4_company = str(row4.get('Company name', '')).strip() if not row4.empty else ''
-        is_email_polluted = '@' in s1_company
-        if is_email_polluted or not s1_company or s1_company.lower() in ['nan','none','null','']:
-            company_name = s2_company if s2_company and s2_company.lower() != 'nan' else (s4_company if s4_company and s4_company.lower() != 'nan' else '未知企业')
+        if has_task_in_s1:
+            task_no = str(row.get("任务号", "")).strip()
+        else:
+            task_no = ""
+        if _is_empty(task_no) and not df2.empty and "任务号" in df2.columns:
+            s1_company = _get_col(row, "客户名称 Client Name", "公司名称", default="")
+            if s1_company:
+                mask = df2["企业名称"].astype(str).str.contains(s1_company[:8], na=False) | df2["企业中文名字"].astype(str).str.contains(s1_company[:8], na=False)
+                match = df2[mask]
+                if not match.empty:
+                    task_no = str(match.iloc[0]["任务号"]).strip()
+        row2 = _match_row(df2, task_no)
+        row3 = _match_row(df3, task_no)
+        row4 = _match_row(df4, task_no)
+        s1_company = _get_col(row, "客户名称 Client Name", "公司名称", default="")
+        s2_company = _get_col(row2, "企业中文名字", "企业名称", default="") if not _is_empty_series(row2) else ""
+        s4_company = _get_col(row4, "Company name", default="") if not _is_empty_series(row4) else ""
+        is_email_polluted = "@" in s1_company if s1_company else False
+        if is_email_polluted or not s1_company:
+            company_name = s2_company if s2_company else (s4_company if s4_company else "未知企业")
             if is_email_polluted:
-                anomaly_log.append({'任务号': task_no, '异常类型': '邮箱污染公司名', '原污染值': s1_company, '修复后值': company_name})
+                anomaly_log.append({"任务号": task_no, "异常类型": "邮箱污染公司名", "原污染值": s1_company, "修复后值": company_name})
         else:
             company_name = s1_company
-        company_en = str(row2.get('企业英文名字', s4_company if s4_company != company_name else '')).strip() if not row2.empty else s4_company
-        if company_en.lower() in ['nan','none','null']: company_en = ''
-        lead = str(row.get('审核组长', row2.get('组长', ''))).strip()
-        members = str(row2.get('组员', '')).strip() if (not row2.empty and pd.notna(row2.get('组员'))) else ''
-        team_str = f'{lead} (成员: {members})' if (members and members.lower() != 'nan') else lead
-        address = str(row.get('审核地址', '')).strip()
-        is_address_date = re.match(r'^\d{4}[-/]\d{2}[-/]\d{2}', address)
-        if is_address_date or address.lower() in ['nan','none','null','']:
-            real_address = str(row2.get('审核地址', '')).strip() if not row2.empty else ''
+        if not _is_empty_series(row2):
+            ce = _get_col(row2, "企业英文名字", default="")
+            company_en = ce if ce and ce != company_name else ""
+        else:
+            company_en = s4_company if s4_company != company_name else ""
+        if _is_empty(company_en): company_en = ""
+        lead = _get_col(row, "审核组长", "审核组 (LA+Co)", default="")
+        if not lead and not _is_empty_series(row2):
+            lead = _get_col(row2, "组长", default="")
+        members = _get_col(row2, "组员", default="") if not _is_empty_series(row2) else ""
+        team_str = "%s (成员: %s)" % (lead, members) if (members and members != lead) else lead
+        address = _get_col(row, "审核地址", default="")
+        is_address_date = re.match(r"^\d{4}[-/]\d{2}[-/]\d{2}", address)
+        if is_address_date or not address:
+            real_address = _get_col(row2, "审核地址", default="") if not _is_empty_series(row2) else ""
             if is_address_date:
-                anomaly_log.append({'任务号': task_no, '异常类型': '地址错入日期', '原污染值': address, '修复后值': real_address})
-            address = real_address if real_address.lower() != 'nan' else '未填写'
-        scope = str(row.get('认证范围', '')).strip()
-        if not scope or scope.lower() in ['nan','none','null','']:
-            scope = str(row2.get('审核范围', '')).strip() if not row2.empty else ''
-        if scope.lower() in ['nan','none','null','']: scope = ''
-        standard = str(row2.get('标准', '')).strip() if not row2.empty else 'ISO/IATF'
-        if standard.lower() in ['nan','none','null','']: standard = ''
-        decision = str(row.get('认证决定结论', '')).strip()
-        if not decision or decision.lower() in ['nan','none','null','']:
-            decision = str(row3.get('Sheet3_结论', row4.get('Observations', ''))).strip() if not row3.empty else ''
-        date_val = str(row.get('日期', '')).strip()
-        if not date_val or date_val.lower() in ['nan','0','none','']:
-            date_val = str(row3.get('Sheet3_日期', row4.get('VP pass date', ''))).strip() if not row3.empty else ''
-        date_val = format_date(date_val) if date_val and date_val.lower() not in ['nan','none','null','0'] else ''
+                anomaly_log.append({"任务号": task_no, "异常类型": "地址错入日期", "原污染值": address, "修复后值": real_address})
+            address = real_address if real_address else "未填写"
+        scope = _get_col(row, "认证范围", default="")
+        if not scope and not _is_empty_series(row2):
+            scope = _get_col(row2, "审核范围", default="")
+        if not scope: scope = ""
+        standard = _get_col(row2, "标准", default="ISO/IATF") if not _is_empty_series(row2) else "ISO/IATF"
+        if not standard: standard = "ISO/IATF"
+        decision = _get_col(row, "认证决定结论", default="")
+        if not decision:
+            if not _is_empty_series(row3):
+                decision = _get_col(row3, "Sheet3_结论", "Observations", default="")
+            if not decision and not _is_empty_series(row4):
+                decision = _get_col(row4, "Observations", default="")
+        date_val = _get_col(row, "日期", "评定通过时间", default="")
+        if not date_val:
+            if not _is_empty_series(row3):
+                date_val = _get_col(row3, "Sheet3_日期", "Date", default="")
+            if not date_val and not _is_empty_series(row4):
+                date_val = _get_col(row4, "VP pass date", default="")
+        date_val = format_date(date_val) if date_val else ""
         master_list.append({
-            '序号': row.get('项目序号 No.', idx + 1),
-            '合同号': str(row.get('合同号 Contract No.', '')).strip() if str(row.get('合同号 Contract No.', '')).lower() != 'nan' else '',
-            '任务号': task_no,
-            '公司中文名': company_name,
-            '公司英文名': company_en,
-            '审核类型': str(row.get('审核类型Audit Type', row2.get('审核类型', ''))).strip(),
-            '认证标准': standard,
-            '审核团队': team_str,
-            '评定人员': str(row.get('评定人员', row2.get('评定人员', ''))).strip(),
-            '审核地址': address,
-            '认证范围': scope,
-            '认证结论': decision,
-            '结论日期': date_val,
+            "序号": _get_col(row, "项目序号 No.", default=str(idx + 1)),
+            "合同号": _get_col(row, "合同号 Contract No.", default=""),
+            "任务号": task_no,
+            "公司中文名": company_name,
+            "公司英文名": company_en,
+            "审核类型": _get_col(row, "审核类型Audit Type", default=""),
+            "认证标准": standard,
+            "审核团队": team_str,
+            "评定人员": _get_col(row, "评定人员", default=""),
+            "审核地址": address,
+            "认证范围": scope,
+            "认证结论": decision,
+            "结论日期": date_val,
         })
     return pd.DataFrame(master_list), pd.DataFrame(anomaly_log)
+
 
 def extract_form_fields(doc):
     fields = {}
@@ -467,3 +536,4 @@ else:  # 批量生成 (Excel)
         st.info('请上传 Excel 数据文件和报告模版')
 
 st.caption('Cert Report Generator v2.10')
+
