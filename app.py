@@ -2,7 +2,6 @@ import sys, io, re, zipfile
 from datetime import datetime
 import streamlit as st
 
-# 依赖库检测
 try:
     import openpyxl
 except ImportError:
@@ -21,21 +20,19 @@ st.set_page_config(
 )
 
 st.title("📄 认证报告自动化生成系统")
-st.caption("支持单份 FORM6101 报告匹配生成与 Excel 数据低 CPU 占用分批导出")
+st.caption("支持单份 FORM6101 报告匹配生成与 Excel 数据低 CPU/内存占用分批导出")
 st.markdown("---")
 
 CHK_EMPTY = chr(0x25A1)
 CHK_FILLED = chr(0x25A0)
 
 def clean_text(val):
-    """彻底清洗文本：去除 None、换行符及前后空格"""
     if val is None:
         return ''
     s = str(val).replace('\r', ' ').replace('\n', ' ').strip()
     return re.sub(r'\s+', ' ', s)
 
 def format_date(val):
-    """干净化日期格式化"""
     if val is None: return ''
     if isinstance(val, datetime): return val.strftime('%Y-%m-%d')
     s = clean_text(val)
@@ -57,9 +54,7 @@ def safe_get_cell(row_vals, idx):
     return ''
 
 def batch_read_row(row_tuple):
-    """从 Excel 行中提取数据"""
     vals = list(row_tuple) if row_tuple else []
-    
     company = clean_text(safe_get_cell(vals, 2))
     leader_raw = clean_text(safe_get_cell(vals, 3))
     leader = leader_raw.split('+')[0].strip() if leader_raw else ''
@@ -76,7 +71,6 @@ def batch_read_row(row_tuple):
     }
 
 def batch_get_conclusion_idx(atype, decision):
-    """精准判断认证决定勾选索引 (0-6)"""
     at, dec = clean_text(atype), clean_text(decision)
     is_surv = ('监' in at or '监督' in at)
     
@@ -92,39 +86,7 @@ def batch_get_conclusion_idx(atype, decision):
         return 3 if ('换发' in dec or '换证' in dec) else 0
     return 0
 
-def update_xml_checkboxes(doc_xml, con_idx):
-    """安全地在底层 XML 中选中第 con_idx 个认证决定复选框，防止损坏 XML 文件"""
-    try:
-        # 匹配所有 w:fldSimple 或 FORMCHECKBOX 的节点块
-        pattern = re.compile(r'(<w:fldSimple[^>]*w:type="FORMCHECKBOX"[^>]*>.*?<\/w:fldSimple>|<w:ffData>.*?FORMCHECKBOX.*?<\/w:ffData>)', re.DOTALL)
-        matches = list(pattern.finditer(doc_xml))
-        
-        # 结论复选框通常在后 7 个节点 (索引 66-72 区域)
-        if len(matches) >= 7:
-            start_offset = max(0, len(matches) - 7)
-            target_matches = matches[start_offset:start_offset + 7]
-            
-            for idx, match in enumerate(target_matches):
-                chunk = match.group(0)
-                # 清除现有的选中标记
-                new_chunk = re.sub(r'<w:checked\s*\/>', '', chunk)
-                new_chunk = re.sub(r'<w:checked\s+w:val="[01]"\s*\/>', '', new_chunk)
-                
-                # 如果是目标勾选位置，注入 w:checked
-                if idx == con_idx:
-                    if '<w:ffData>' in new_chunk:
-                        new_chunk = new_chunk.replace('<w:ffData>', '<w:ffData><w:checked/>')
-                    else:
-                        new_chunk = new_chunk.replace('FORMCHECKBOX', 'w:checked/>FORMCHECKBOX')
-                
-                # 替换 XML 文本
-                doc_xml = doc_xml.replace(chunk, new_chunk, 1)
-    except Exception:
-        pass # 防崩保护
-    return doc_xml
-
-def fill_text_clean(para, keyword, value):
-    """精准替换文本中的占位符，不遗留杂质"""
+def safe_replace_para(para, keyword, value):
     if not value or keyword not in para.text:
         return
     full_text = para.text
@@ -132,15 +94,14 @@ def fill_text_clean(para, keyword, value):
         new_text = re.sub(f'{keyword}[：:]\s*.*', f'{keyword}：{value}', full_text)
     else:
         new_text = f"{keyword}：{value}"
-        
-    for r in para.runs:
-        r.text = ''
+    
     if para.runs:
         para.runs[0].text = new_text
-    else:
-        para.add_run(new_text)
+        for r in para.runs[1:]:
+            r.text = ''
 
 def batch_fill_report_fast(tpl_doc_bytes, fields):
+    # 使用独立的 BytesIO 输入流
     doc = Document(io.BytesIO(tpl_doc_bytes))
     company = fields.get('company', '')
     taskNo = fields.get('taskNo', '')
@@ -149,22 +110,19 @@ def batch_fill_report_fast(tpl_doc_bytes, fields):
     address = fields.get('address', '')
     scope = fields.get('scope', '')
     date_val = fields.get('date', '')
-    decision = fields.get('decision', '')
 
     tn_upper = str(taskNo).upper()
     has_ts, has_er = 'TS' in tn_upper, 'ER' in tn_upper
 
-    # 处理正文段落
     for para in doc.paragraphs:
-        if '公司名称' in para.text: fill_text_clean(para, '公司名称', company)
-        if '任务号' in para.text: fill_text_clean(para, '任务号', taskNo)
-        if '任务编号' in para.text: fill_text_clean(para, '任务编号', taskNo)
-        if '审核组长' in para.text: fill_text_clean(para, '审核组长', leader)
-        if '审核地址' in para.text: fill_text_clean(para, '审核地址', address)
-        if '认证范围' in para.text: fill_text_clean(para, '认证范围', scope)
-        if '日期' in para.text: fill_text_clean(para, '日期', date_val)
+        if '公司名称' in para.text: safe_replace_para(para, '公司名称', company)
+        if '任务号' in para.text: safe_replace_para(para, '任务号', taskNo)
+        if '任务编号' in para.text: safe_replace_para(para, '任务编号', taskNo)
+        if '审核组长' in para.text: safe_replace_para(para, '审核组长', leader)
+        if '审核地址' in para.text: safe_replace_para(para, '审核地址', address)
+        if '认证范围' in para.text: safe_replace_para(para, '认证范围', scope)
+        if '日期' in para.text: safe_replace_para(para, '日期', date_val)
 
-    # 处理表格单元格
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
@@ -172,24 +130,21 @@ def batch_fill_report_fast(tpl_doc_bytes, fields):
                     p_txt = para.text
                     if not p_txt.strip(): continue
                     
-                    if '公司名称' in p_txt: fill_text_clean(para, '公司名称', company)
-                    if '任务号' in p_txt: fill_text_clean(para, '任务号', taskNo)
-                    if '任务编号' in p_txt: fill_text_clean(para, '任务编号', taskNo)
-                    if '审核组长' in p_txt: fill_text_clean(para, '审核组长', leader)
-                    if '审核地址' in p_txt: fill_text_clean(para, '审核地址', address)
-                    if '认证范围' in p_txt: fill_text_clean(para, '认证范围', scope)
-                    if '日期' in p_txt: fill_text_clean(para, '日期', date_val)
+                    if '公司名称' in p_txt: safe_replace_para(para, '公司名称', company)
+                    if '任务号' in p_txt: safe_replace_para(para, '任务号', taskNo)
+                    if '任务编号' in p_txt: safe_replace_para(para, '任务编号', taskNo)
+                    if '审核组长' in p_txt: safe_replace_para(para, '审核组长', leader)
+                    if '审核地址' in p_txt: safe_replace_para(para, '审核地址', address)
+                    if '认证范围' in p_txt: safe_replace_para(para, '认证范围', scope)
+                    if '日期' in p_txt: safe_replace_para(para, '日期', date_val)
 
-                    # 体系类型勾选
                     if 'IATF16949' in p_txt or 'ISO9001' in p_txt:
                         new_t = para.text
                         if has_ts: new_t = new_t.replace(CHK_EMPTY + ' IATF16949', CHK_FILLED + ' IATF16949').replace(CHK_EMPTY + 'IATF16949', CHK_FILLED + 'IATF16949')
                         if has_er: new_t = new_t.replace(CHK_EMPTY + ' ISO9001', CHK_FILLED + ' ISO9001').replace(CHK_EMPTY + 'ISO9001', CHK_FILLED + 'ISO9001')
-                        if new_t != para.text:
-                            for r in para.runs: r.text = ''
-                            para.runs[0].text = new_t if para.runs else para.add_run(new_t)
+                        if new_t != para.text and para.runs:
+                            para.runs[0].text = new_t
 
-                    # 审核类型勾选
                     if auditType and ('初审' in p_txt or '监审' in p_txt or '再认证' in p_txt or '特殊审核' in p_txt):
                         new_t = para.text
                         if '二阶段' in auditType or '初审' in auditType or '一阶段' in auditType: 
@@ -200,32 +155,15 @@ def batch_fill_report_fast(tpl_doc_bytes, fields):
                             new_t = new_t.replace(CHK_EMPTY + '再认证/转移', CHK_FILLED + '再认证/转移')
                         if '特殊' in auditType: 
                             new_t = new_t.replace(CHK_EMPTY + '特殊审核', CHK_FILLED + '特殊审核')
-                        if new_t != para.text:
-                            for r in para.runs: r.text = ''
-                            para.runs[0].text = new_t if para.runs else para.add_run(new_t)
+                        if new_t != para.text and para.runs:
+                            para.runs[0].text = new_t
 
     out_buf = io.BytesIO()
     doc.save(out_buf)
     out_buf.seek(0)
+    return out_buf.getvalue()
 
-    # 安全地进行 XML 复选框更新
-    con_idx = batch_get_conclusion_idx(auditType, decision)
-    try:
-        with zipfile.ZipFile(out_buf, 'r') as z:
-            content = {name: z.read(name) for name in z.namelist()}
-        
-        doc_xml = content['word/document.xml'].decode('utf-8')
-        doc_xml = update_xml_checkboxes(doc_xml, con_idx)
-        content['word/document.xml'] = doc_xml.encode('utf-8')
-        
-        res_buf = io.BytesIO()
-        with zipfile.ZipFile(res_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
-            for name, data in content.items(): zout.writestr(name, data)
-        return res_buf.getvalue()
-    except Exception:
-        return out_buf.getvalue()
-
-# ==================== STREAMLIT UI 主页面 ====================
+# ==================== STREAMLIT UI ====================
 
 mode = st.radio('选择操作模式', ['Single Report (单份生成)', 'Batch Generation (防降频极速版)'], key='app_mode')
 
@@ -238,8 +176,7 @@ if 'Single Report' in mode:
     if ff and tf:
         if st.button('🚀 立即生成单份报告', type='primary'):
             try:
-                # 简单单份提取与生成
-                doc_bytes = batch_fill_report_fast(tf.getvalue(), {'company': '单份测试公司'})
+                doc_bytes = batch_fill_report_fast(tf.getvalue(), {'company': '单份认证报告公司'})
                 st.success("✅ 报告生成成功！")
                 st.download_button('📥 下载生成的 Word 报告', doc_bytes, file_name="single_report.docx")
             except Exception as e:
@@ -253,7 +190,8 @@ else:
 
     if ef and tf:
         try:
-            wb = openpyxl.load_workbook(io.BytesIO(ef.getvalue()), data_only=True)
+            # 使用 read_only=True 极轻量化加载 Excel，防止内存溢出引发 Oh No 报错
+            wb = openpyxl.load_workbook(io.BytesIO(ef.getvalue()), data_only=True, read_only=True)
             ws = wb.active
             rows_data = []
             
@@ -272,7 +210,7 @@ else:
                 col_batch_size, col_batch_num = st.columns(2)
                 
                 with col_batch_size:
-                    batch_size = st.number_input('每批次处理数量：', min_value=1, max_value=50, value=15, step=5)
+                    batch_size = st.number_input('每批次处理数量：', min_value=1, max_value=50, value=10, step=5)
                 
                 total_batches = (total_count + batch_size - 1) // batch_size
                 
@@ -292,25 +230,38 @@ else:
                     st.text(f"  [{idx}] 公司: {item['company']} | 任务号: {item['taskNo']} | 类型: {item['auditType']}")
 
                 if st.button(f'🚀 生成第 {selected_batch} 批报告并打包 ZIP', type='primary'):
-                    with st.spinner(f'正在极速生成第 {selected_batch} 批（共 {len(current_batch_data)} 份）...'):
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    try:
                         zb = io.BytesIO()
                         tpl_bytes = tf.getvalue()
                         
                         with zipfile.ZipFile(zb, 'w', zipfile.ZIP_DEFLATED) as zf:
-                            for item in current_batch_data:
+                            for idx, item in enumerate(current_batch_data):
                                 try:
+                                    status_text.text(f"正在处理 ({idx+1}/{len(current_batch_data)}): {item['company']}")
                                     doc_bytes = batch_fill_report_fast(tpl_bytes, item)
-                                    zf.writestr(f"{item['company']}.docx", doc_bytes)
+                                    # 清理公司名称中的非法字符作为文件名
+                                    safe_filename = re.sub(r'[\\/*?:"<>|]', '_', item['company'])
+                                    zf.writestr(f"{safe_filename}.docx", doc_bytes)
                                 except Exception as err:
                                     st.warning(f"跳过 {item['company']}：{err}")
+                                progress_bar.progress((idx + 1) / len(current_batch_data))
 
                         zb.seek(0)
+                        zip_data = zb.getvalue()
+                        
+                        status_text.empty()
+                        progress_bar.empty()
                         st.success(f"🎉 第 {selected_batch} 批报告导出完成！")
                         st.download_button(
-                            label=f'📥 下载第 {selected_batch} 批压缩包 (batch_{selected_batch}.zip)',
-                            data=zb.getvalue(),
+                            label=f'📥 点击下载第 {selected_batch} 批压缩包',
+                            data=zip_data,
                             file_name=f"认证报告_第{selected_batch}批.zip",
                             mime="application/zip"
                         )
+                    except Exception as gen_err:
+                        st.error(f"生成过程发生错误: {str(gen_err)}")
         except Exception as e:
-            st.error(f"处理 Excel/Word 发生错误: {str(e)}")
+            st.error(f"读取 Excel 文件失败: {str(e)}")
