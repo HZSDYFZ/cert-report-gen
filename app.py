@@ -1,589 +1,427 @@
-# -*- coding: utf-8 -*-
-import io
-import re
-import zipfile
+import sys, io, re, zipfile
+from datetime import datetime
 import pandas as pd
 import streamlit as st
 from docx import Document
-from docx.shared import Inches, Pt, RGBColor
 
-st.set_page_config(
-    page_title="认证评定自动化解析与模版生成系统", layout="wide"
-)
+CHK_EMPTY = chr(0x25A1)
+CHK_FILLED = chr(0x25A0)
+
+# ===== Helper functions =====
+
+def format_date(val):
+    if val is None: return ''
+    if isinstance(val, datetime): return val.strftime('%Y-%m-%d')
+    s = str(val).strip()
+    m = re.search(r'(\d{4})[年\-/](\d{1,2})[月\-/](\d{1,2})', s)
+    if m: return m.group(1)+'-'+m.group(2).zfill(2)+'-'+m.group(3).zfill(2)
+    m = re.search(r'(\d{1,2})/(\d{1,2})/(\d{4})', s)
+    if m: return m.group(3)+'-'+m.group(1).zfill(2)+'-'+m.group(2).zfill(2)
+    return s[:10] if len(s) >= 10 else s
+
+def get_conclusion_idx(atype):
+    atype = str(atype).strip() if atype else ''
+    is_surv = '监' in atype and '再认证' not in atype and '二阶段' not in atype and '一阶段' not in atype
+    if '一阶段' in atype or '二阶段' in atype or '再认证' in atype: return 0
+    elif '转移' in atype: return 2
+    elif is_surv:
+        if '换发' in atype: return 5
+        else: return 4
+    else: return 0
+
+def is_audit_surv(atype):
+    return '监' in atype and '再认证' not in atype and '二阶段' not in atype and '一阶段' not in atype
+
+def set_fcb(doc_xml, pos, checked):
+    cs = max(0, pos - 300)
+    chunk = doc_xml[cs:pos + 100]
+    if checked:
+        if 'w:checked w:val=\"0\"' in chunk:
+            return doc_xml[:cs] + chunk.replace('w:checked w:val=\"0\"/>', 'w:checked/>') + doc_xml[pos + 100:]
+        if 'w:checked' not in chunk:
+            return doc_xml[:cs] + chunk.replace('FORMCHECKBOX', 'w:checked/>FORMCHECKBOX') + doc_xml[pos + 100:]
+    else:
+        if 'w:checked/>' in chunk:
+            return doc_xml[:cs] + chunk.replace('w:checked/>', 'w:checked w:val=\"0\"/>') + doc_xml[pos + 100:]
+    return doc_xml
+
+def fill_cert_standard(cell_text, atype):
+    at = atype.strip()
+    result = cell_text
+    if 'IATF16949' in cell_text and 'IATF' in at:
+        result = result.replace(CHK_EMPTY + ' IATF16949', CHK_FILLED + ' IATF16949')
+    if 'ISO9001' in cell_text and '9001' in at:
+        result = result.replace(CHK_EMPTY + ' ISO9001', CHK_FILLED + ' ISO9001')
+    if 'ISO14001' in cell_text and ('EMS' in at or '14001' in at):
+        result = result.replace(CHK_EMPTY + ' ISO14001', CHK_FILLED + ' ISO14001')
+    if 'ISO45001' in cell_text:
+        if 'OHS' in at or '45001' in at:
+            result = result.replace(CHK_EMPTY + 'ISO 45001', CHK_FILLED + 'ISO 45001')
+            if result == cell_text:
+                result = result.replace(CHK_EMPTY + 'ISO45001', CHK_FILLED + 'ISO45001')
+    return result
+
+def fill_audit_type(cell_text, atype):
+    at = atype.strip()
+    is_surv = is_audit_surv(at)
+    result = cell_text
+    if '一阶段' in at or '二阶段' in at or '再认证' in at:
+        result = result.replace(CHK_EMPTY + '初审', CHK_FILLED + '初审')
+    if is_surv:
+        result = result.replace(CHK_EMPTY + '监审', CHK_FILLED + '监审')
+    if '再认证' in at or '转移' in at:
+        result = result.replace(CHK_EMPTY + '再认证/转移', CHK_FILLED + '再认证/转移')
+    if '特殊' in at:
+        result = result.replace(CHK_EMPTY + '特殊审核', CHK_FILLED + '特殊审核')
+    return result
+
+# ===== Core fill function (replaces fill_word_template_single) =====
+
+def fill_word_template_single(data_dict, template_bytes=None):
+    '''填充 Word 模版 - 使用表格单元格定位填充'''
+    if not template_bytes:
+        # Fallback: create simple doc
+        doc = Document()
+        doc.add_heading('认证评定报告 - ' + str(data_dict.get('公司中文名', '')), level=1)
+        p = doc.add_paragraph()
+        p.add_run('公司名称: ').bold = True
+        p.add_run(str(data_dict.get('公司中文名', '')))
+        out = io.BytesIO()
+        doc.save(out)
+        out.seek(0)
+        return out.getvalue()
+    
+    doc = Document(io.BytesIO(template_bytes))
+    company = str(data_dict.get('公司中文名', '')).strip()
+    taskNo = str(data_dict.get('任务号', '')).strip()
+    leader = str(data_dict.get('审核团队', '')).strip()
+    # Extract just the lead name (before parenthesis)
+    leader_clean = leader.split('(')[0].strip() if '(' in leader else leader
+    auditType = str(data_dict.get('审核类型', '')).strip()
+    address = str(data_dict.get('审核地址', '')).strip()
+    scope = str(data_dict.get('认证范围', '')).strip()
+    
+    filled = {'company': False, 'taskNo': False, 'leader': False, 'address': False, 'scope': False}
+    
+    # Process paragraphs (for any {{}} tags that might exist)
+    for para in doc.paragraphs:
+        runs = list(para.runs)
+        full_text = ''.join(r.text or '' for r in runs)
+        if company and not filled['company'] and '公司名称' in full_text:
+            for i, run in enumerate(runs):
+                if run.text and '公司名称' in run.text:
+                    if i + 1 < len(runs): runs[i + 1].text = (runs[i + 1].text or '') + company
+                    else: run.text = run.text + company
+                    filled['company'] = True; break
+        if taskNo and not filled['taskNo'] and ('任务号' in full_text or '任务编号' in full_text):
+            for i, run in enumerate(runs):
+                if run.text and ('任务号' in run.text or '任务编号' in run.text):
+                    if i + 1 < len(runs): runs[i + 1].text = (runs[i + 1].text or '') + taskNo
+                    else: run.text = run.text + taskNo
+                    filled['taskNo'] = True; break
+        if leader_clean and not filled['leader'] and '审核组长' in full_text:
+            for i, run in enumerate(runs):
+                if run.text and '审核组长' in run.text:
+                    if i + 1 < len(runs): runs[i + 1].text = (runs[i + 1].text or '') + leader_clean
+                    else: run.text = run.text + leader_clean
+                    filled['leader'] = True; break
+        if address and not filled['address'] and '审核地址' in full_text:
+            for i, run in enumerate(runs):
+                if run.text and '审核地址' in run.text:
+                    if i + 1 < len(runs): runs[i + 1].text = (runs[i + 1].text or '') + address
+                    else: run.text = run.text + address
+                    filled['address'] = True; break
+        if scope and not filled['scope'] and '认证范围' in full_text:
+            for i, run in enumerate(runs):
+                if run.text and '认证范围' in run.text:
+                    if i + 1 < len(runs): runs[i + 1].text = (runs[i + 1].text or '') + scope
+                    else: run.text = run.text + scope
+                    filled['scope'] = True; break
+    
+    # Process tables
+    for table in doc.tables:
+        for ri, row in enumerate(table.rows):
+            cells = row.cells
+            # Row 0: 公司名称 in cells 0-2, 任务号 in cells 3-4
+            if ri == 0:
+                if company and not filled['company']:
+                    for ci in range(min(3, len(cells))):
+                        for para in cells[ci].paragraphs:
+                            runs = list(para.runs)
+                            for i, run in enumerate(runs):
+                                if run.text and '公司名称' in run.text:
+                                    if i + 1 < len(runs): runs[i + 1].text = (runs[i + 1].text or '') + company
+                                    else: run.text = run.text + company
+                                    filled['company'] = True; break
+                            if filled['company']: break
+                        if filled['company']: break
+                if taskNo and not filled['taskNo'] and len(cells) > 3:
+                    for para in cells[3].paragraphs:
+                        runs = list(para.runs)
+                        for i, run in enumerate(runs):
+                            if run.text and ('任务号' in run.text or '任务编号' in run.text):
+                                if i + 1 < len(runs): runs[i + 1].text = (runs[i + 1].text or '') + taskNo
+                                else: run.text = run.text + taskNo
+                                filled['taskNo'] = True; break
+                        if filled['taskNo']: break
+            # Row 1: 审核组长 in cell 2
+            if ri == 1 and leader_clean and not filled['leader'] and len(cells) > 2:
+                cell = cells[2]
+                has_content = any(r.text and r.text.strip() for para in cell.paragraphs for r in para.runs)
+                if not has_content:
+                    para = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
+                    para.add_run(leader_clean)
+                    filled['leader'] = True
+            # Row 2: 认证标准
+            if ri == 2 and auditType:
+                at = auditType.strip()
+                for ci in range(2, min(5, len(cells))):
+                    for para in cells[ci].paragraphs:
+                        new_text = fill_cert_standard(para.text, at)
+                        if new_text != para.text:
+                            for run in para.runs: run.text = ''
+                            if para.runs: para.runs[0].text = new_text
+                            else: para.add_run(new_text)
+            # Row 3: 审核类型
+            if ri == 3 and auditType:
+                at = auditType.strip()
+                for ci in range(2, min(5, len(cells))):
+                    for para in cells[ci].paragraphs:
+                        new_text = fill_audit_type(para.text, at)
+                        if new_text != para.text:
+                            for run in para.runs: run.text = ''
+                            if para.runs: para.runs[0].text = new_text
+                            else: para.add_run(new_text)
+            # Row 4: 审核地址
+            if ri == 4 and address and not filled['address']:
+                for ci in range(2, min(5, len(cells))):
+                    for para in cells[ci].paragraphs:
+                        for run in para.runs:
+                            if run.text and '审核地址' in run.text:
+                                if run.text.strip() == '审核地址：':
+                                    run.text = run.text + address; filled['address'] = True
+                                else:
+                                    runs = list(para.runs)
+                                    for i, r in enumerate(runs):
+                                        if r.text and '审核地址' in r.text:
+                                            if i + 1 < len(runs): runs[i + 1].text = (runs[i + 1].text or '') + address
+                                            else: r.text = r.text + address
+                                            filled['address'] = True; break
+                                    if filled['address']: break
+                                if filled['address']: break
+                        if filled['address']: break
+            # Row 5: 认证范围
+            if ri == 5 and scope and not filled['scope']:
+                for ci in range(2, min(5, len(cells))):
+                    for para in cells[ci].paragraphs:
+                        for run in para.runs:
+                            if run.text and '认证范围' in run.text:
+                                if run.text.strip() == '认证范围：':
+                                    run.text = run.text + scope; filled['scope'] = True
+                                else:
+                                    runs = list(para.runs)
+                                    for i, r in enumerate(runs):
+                                        if r.text and '认证范围' in r.text:
+                                            if i + 1 < len(runs): runs[i + 1].text = (runs[i + 1].text or '') + scope
+                                            else: r.text = r.text + scope
+                                            filled['scope'] = True; break
+                                    if filled['scope']: break
+                                if filled['scope']: break
+                        if filled['scope']: break
+    
+    # Fill conclusion FORMCHECKBOX (FCB 66-72)
+    if auditType:
+        con_idx = get_conclusion_idx(auditType)
+        buf = io.BytesIO(); doc.save(buf); buf.seek(0)
+        with zipfile.ZipFile(buf, 'r') as z:
+            content = {name: z.read(name) for name in z.namelist()}
+        doc_xml = content['word/document.xml'].decode('utf-8')
+        fcb_positions = []
+        for m in re.finditer(r'FORMCHECKBOX', doc_xml):
+            pos = m.start()
+            cs = max(0, pos - 300)
+            chunk = doc_xml[cs:pos + 100]
+            if 'w:checked w:val=\"0\"' in chunk: val = '0'
+            elif 'w:checked/>' in chunk: val = '1'
+            elif 'w:checked' in chunk: val = '1'
+            else: val = '?'
+            fcb_positions.append((pos, val))
+        for idx in range(7):
+            abs_idx = idx + 66
+            if abs_idx < len(fcb_positions):
+                abs_pos, old_val = fcb_positions[abs_idx]
+                doc_xml = set_fcb(doc_xml, abs_pos, (idx == con_idx))
+        content['word/document.xml'] = doc_xml.encode('utf-8')
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zout:
+            for name, data in content.items(): zout.writestr(name, data)
+        out.seek(0); doc = Document(out)
+    
+    out = io.BytesIO()
+    doc.save(out)
+    out.seek(0)
+    return out.getvalue()
 
 
-# ==========================================
-# 1. 核心解析与数据清洗引擎 (Sheet1 ~ Sheet4)
-# ==========================================
+# ===== EXCEL Parsing (from GitHub version) =====
+
 def parse_and_fix_excel(file_buffer):
-    """四表联动解析与数据清洗核心引擎"""
     xls = pd.ExcelFile(file_buffer)
-
-    df1 = pd.read_excel(xls, sheet_name="Sheet1")
-    df2 = (
-        pd.read_excel(xls, sheet_name="Sheet2")
-        if "Sheet2" in xls.sheet_names
-        else pd.DataFrame()
-    )
-    df3 = (
-        pd.read_excel(xls, sheet_name="Sheet3")
-        if "Sheet3" in xls.sheet_names
-        else pd.DataFrame()
-    )
-    df4 = (
-        pd.read_excel(xls, sheet_name="Sheet4")
-        if "Sheet4" in xls.sheet_names
-        else pd.DataFrame()
-    )
+    df1 = pd.read_excel(xls, sheet_name='Sheet1')
+    df2 = pd.read_excel(xls, sheet_name='Sheet2') if 'Sheet2' in xls.sheet_names else pd.DataFrame()
+    df3 = pd.read_excel(xls, sheet_name='Sheet3') if 'Sheet3' in xls.sheet_names else pd.DataFrame()
+    df4 = pd.read_excel(xls, sheet_name='Sheet4') if 'Sheet4' in xls.sheet_names else pd.DataFrame()
 
     if not df3.empty:
-        df3 = df3.rename(
-            columns={
-                df3.columns[0]: "任务号",
-                "Observations": "Sheet3_结论",
-                "Date": "Sheet3_日期",
-            }
-        )
-        df3 = df3.drop_duplicates(subset=["任务号"], keep="first")
-
+        df3 = df3.rename(columns={df3.columns[0]: '任务号', 'Observations': 'Sheet3_结论', 'Date': 'Sheet3_日期'})
+        df3 = df3.drop_duplicates(subset=['任务号'], keep='first')
     if not df4.empty:
         df4.columns = df4.iloc[0]
         df4 = df4[1:].reset_index(drop=True)
-        df4 = df4.rename(columns={"File number(s)": "任务号"})
-        df4 = df4.drop_duplicates(subset=["任务号"], keep="first")
-
-    if not df2.empty and "任务号" in df2.columns:
-        df2 = df2.drop_duplicates(subset=["任务号"], keep="first")
+        df4 = df4.rename(columns={'File number(s)': '任务号'})
+        df4 = df4.drop_duplicates(subset=['任务号'], keep='first')
+    if not df2.empty and '任务号' in df2.columns:
+        df2 = df2.drop_duplicates(subset=['任务号'], keep='first')
 
     master_list = []
     anomaly_log = []
 
     for idx, row in df1.iterrows():
-        task_no = str(row.get("任务号", "")).strip()
+        task_no = str(row.get('任务号', '')).strip()
+        row2 = df2[df2['任务号'] == task_no].iloc[0] if (not df2.empty and task_no in df2['任务号'].values) else pd.Series()
+        row3 = df3[df3['任务号'] == task_no].iloc[0] if (not df3.empty and task_no in df3['任务号'].values) else pd.Series()
+        row4 = df4[df4['任务号'] == task_no].iloc[0] if (not df4.empty and task_no in df4['任务号'].values) else pd.Series()
 
-        row2 = (
-            df2[df2["任务号"] == task_no].iloc[0]
-            if (not df2.empty and task_no in df2["任务号"].values)
-            else pd.Series()
-        )
-        row3 = (
-            df3[df3["任务号"] == task_no].iloc[0]
-            if (not df3.empty and task_no in df3["任务号"].values)
-            else pd.Series()
-        )
-        row4 = (
-            df4[df4["任务号"] == task_no].iloc[0]
-            if (not df4.empty and task_no in df4["任务号"].values)
-            else pd.Series()
-        )
-
-        # 公司名称提取与邮箱污染修正
-        s1_company = str(row.get("客户名称 Client Name", "")).strip()
-        s2_company = (
-            str(row2.get("企业中文名字", row2.get("企业名称", ""))).strip()
-            if not row2.empty
-            else ""
-        )
-        s4_company = (
-            str(row4.get("Company name", "")).strip() if not row4.empty else ""
-        )
-
-        is_email_polluted = "@" in s1_company
-        if (
-            is_email_polluted
-            or not s1_company
-            or s1_company.lower() in ["nan", "none", "null"]
-        ):
-            company_name = (
-                s2_company
-                if s2_company and s2_company.lower() != "nan"
-                else (
-                    s4_company
-                    if s4_company and s4_company.lower() != "nan"
-                    else "未知企业"
-                )
-            )
+        s1_company = str(row.get('客户名称 Client Name', '')).strip()
+        s2_company = str(row2.get('企业中文名字', row2.get('企业名称', ''))).strip() if not row2.empty else ''
+        s4_company = str(row4.get('Company name', '')).strip() if not row4.empty else ''
+        is_email_polluted = '@' in s1_company
+        if is_email_polluted or not s1_company or s1_company.lower() in ['nan','none','null','']:
+            company_name = s2_company if s2_company and s2_company.lower() != 'nan' else (s4_company if s4_company and s4_company.lower() != 'nan' else '未知企业')
             if is_email_polluted:
-                anomaly_log.append(
-                    {
-                        "任务号": task_no,
-                        "异常类型": "邮箱污染公司名",
-                        "原污染值": s1_company,
-                        "修复后值": company_name,
-                    }
-                )
+                anomaly_log.append({'任务号': task_no, '异常类型': '邮箱污染公司名', '原污染值': s1_company, '修复后值': company_name})
         else:
             company_name = s1_company
 
-        # 英文名称
-        company_en = (
-            str(
-                row2.get(
-                    "企业英文名字",
-                    s4_company if s4_company != company_name else "",
-                )
-            ).strip()
-            if not row2.empty
-            else s4_company
-        )
-        if company_en.lower() in ["nan", "none", "null"]:
-            company_en = ""
+        company_en = str(row2.get('企业英文名字', s4_company if s4_company != company_name else '')).strip() if not row2.empty else s4_company
+        if company_en.lower() in ['nan','none','null']: company_en = ''
 
-        # 审核团队组合
-        lead = str(
-            row.get("审核组长", row2.get("组长", "") if not row2.empty else "")
-        ).strip()
-        members = (
-            str(row2.get("组员", "")).strip()
-            if (not row2.empty and pd.notna(row2.get("组员")))
-            else ""
-        )
-        team_str = (
-            f"{lead} (成员: {members})"
-            if (members and members.lower() != "nan")
-            else lead
-        )
+        lead = str(row.get('审核组长', row2.get('组长', ''))).strip()
+        members = str(row2.get('组员', '')).strip() if (not row2.empty and pd.notna(row2.get('组员'))) else ''
+        team_str = f'{lead} (成员: {members})' if (members and members.lower() != 'nan') else lead
 
-        # 审核地址清洗
-        address = str(row.get("审核地址", "")).strip()
-        is_address_date = re.match(r"^\d{4}[-/]\d{2}[-/]\d{2}", address)
-        if is_address_date or address.lower() in ["nan", "none", "null", ""]:
-            real_address = (
-                str(row2.get("审核地址", "")).strip() if not row2.empty else ""
-            )
+        address = str(row.get('审核地址', '')).strip()
+        is_address_date = re.match(r'^\d{4}[-/]\d{2}[-/]\d{2}', address)
+        if is_address_date or address.lower() in ['nan','none','null','']:
+            real_address = str(row2.get('审核地址', '')).strip() if not row2.empty else ''
             if is_address_date:
-                anomaly_log.append(
-                    {
-                        "任务号": task_no,
-                        "异常类型": "地址错入日期时间戳",
-                        "原污染值": address,
-                        "修复后值": real_address,
-                    }
-                )
-            address = (
-                real_address if real_address.lower() != "nan" else "未填写"
-            )
+                anomaly_log.append({'任务号': task_no, '异常类型': '地址错入日期', '原污染值': address, '修复后值': real_address})
+            address = real_address if real_address.lower() != 'nan' else '未填写'
 
-        # 认证范围与标准
-        scope = str(row.get("认证范围", "")).strip()
-        if not scope or scope.lower() in ["nan", "none", "null"]:
-            scope = (
-                str(row2.get("审核范围", "")).strip() if not row2.empty else ""
-            )
-        if scope.lower() in ["nan", "none", "null"]:
-            scope = ""
+        scope = str(row.get('认证范围', '')).strip()
+        if not scope or scope.lower() in ['nan','none','null','']:
+            scope = str(row2.get('审核范围', '')).strip() if not row2.empty else ''
+        if scope.lower() in ['nan','none','null','']: scope = ''
 
-        standard = (
-            str(row2.get("标准", "")).strip() if not row2.empty else "ISO/IATF"
-        )
-        if standard.lower() in ["nan", "none", "null"]:
-            standard = ""
+        standard = str(row2.get('标准', '')).strip() if not row2.empty else 'ISO/IATF'
+        if standard.lower() in ['nan','none','null','']: standard = ''
 
-        # 认证结论与日期
-        decision = str(row.get("认证决定结论", "")).strip()
-        if not decision or decision.lower() in ["nan", "none", "null"]:
-            decision = (
-                str(
-                    row3.get("Sheet3_结论", row4.get("Observations", ""))
-                ).strip()
-                if not row3.empty
-                else ""
-            )
+        decision = str(row.get('认证决定结论', '')).strip()
+        if not decision or decision.lower() in ['nan','none','null','']:
+            decision = str(row3.get('Sheet3_结论', row4.get('Observations', ''))).strip() if not row3.empty else ''
 
-        date_val = str(row.get("日期", "")).strip()
-        if not date_val or date_val.lower() in ["nan", "0", "none"]:
-            date_val = (
-                str(
-                    row3.get("Sheet3_日期", row4.get("VP pass date", ""))
-                ).strip()
-                if not row3.empty
-                else ""
-            )
+        date_val = str(row.get('日期', '')).strip()
+        if not date_val or date_val.lower() in ['nan','0','none','']:
+            date_val = str(row3.get('Sheet3_日期', row4.get('VP pass date', ''))).strip() if not row3.empty else ''
+        date_val = format_date(date_val) if date_val and date_val.lower() not in ['nan','none','null','0'] else ''
 
-        code = (
-            str(row2.get("专业代码", "")).strip() if not row2.empty else ""
-        )
-        fin_status = (
-            str(row2.get("财务收费", "")).strip() if not row2.empty else ""
-        )
-        vp_pass = (
-            str(row4.get("VP pass date", row2.get("VP审批", ""))).strip()
-            if not row4.empty
-            else ""
-        )
-
-        master_list.append(
-            {
-                "序号": row.get("项目序号 No.", idx + 1),
-                "合同号": (
-                    str(row.get("合同号 Contract No.", "")).strip()
-                    if str(row.get("合同号 Contract No.", "")).lower() != "nan"
-                    else ""
-                ),
-                "任务号": task_no,
-                "公司中文名": company_name,
-                "公司英文名": company_en,
-                "审核类型": (
-                    str(
-                        row.get(
-                            "审核类型Audit Type",
-                            row2.get("审核类型", "")
-                            if not row2.empty
-                            else "",
-                        )
-                    ).strip()
-                ),
-                "认证标准": standard,
-                "审核团队": team_str,
-                "评定人员": (
-                    str(
-                        row.get(
-                            "评定人员",
-                            row2.get("评定人员", "") if not row2.empty else "",
-                        )
-                    ).strip()
-                ),
-                "审核地址": address,
-                "认证范围": scope,
-                "认证结论": decision,
-                "结论日期": (
-                    date_val
-                    if date_val.lower() not in ["nan", "none", "null", "0"]
-                    else ""
-                ),
-                "专业代码": code if code.lower() not in ["nan", "0"] else "",
-                "财务状态": (
-                    fin_status if fin_status.lower() not in ["nan", "0"] else ""
-                ),
-                "VP审批时间": (
-                    vp_pass if vp_pass.lower() not in ["nan", "0"] else ""
-                ),
-            }
-        )
+        master_list.append({
+            '序号': row.get('项目序号 No.', idx + 1),
+            '合同号': str(row.get('合同号 Contract No.', '')).strip() if str(row.get('合同号 Contract No.', '')).lower() != 'nan' else '',
+            '任务号': task_no,
+            '公司中文名': company_name,
+            '公司英文名': company_en,
+            '审核类型': str(row.get('审核类型Audit Type', row2.get('审核类型', ''))).strip(),
+            '认证标准': standard,
+            '审核团队': team_str,
+            '评定人员': str(row.get('评定人员', row2.get('评定人员', ''))).strip(),
+            '审核地址': address,
+            '认证范围': scope,
+            '认证结论': decision,
+            '结论日期': date_val,
+        })
 
     return pd.DataFrame(master_list), pd.DataFrame(anomaly_log)
 
 
-# ==========================================
-# 2. Word 模版填充与文件导出模块
-# ==========================================
-def fill_word_template_single(data_dict, template_bytes=None):
-    """单条记录 Word 模版填充（未做任何改动）"""
-    if template_bytes:
-        doc = Document(io.BytesIO(template_bytes))
-
-        def replace_in_paragraphs(paragraphs, data):
-            for p in paragraphs:
-                for k, v in data.items():
-                    tag = f"{{{{{k}}}}}"
-                    if tag in p.text:
-                        p.text = p.text.replace(
-                            tag, str(v) if pd.notna(v) and v != "" else ""
-                        )
-
-        replace_in_paragraphs(doc.paragraphs, data_dict)
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    replace_in_paragraphs(cell.paragraphs, data_dict)
-    else:
-        doc = Document()
-        doc.add_heading(f"认证评定单项报告 - {data_dict['公司中文名']}", level=1)
-
-        p = doc.add_paragraph()
-        p.add_run("• 公司中文名：").bold = True
-        p.add_run(f"{data_dict['公司中文名']}\n")
-
-        p.add_run("• 公司英文名：").bold = True
-        p.add_run(f"{data_dict['公司英文名']}\n")
-
-        p.add_run("• 任务号：").bold = True
-        p.add_run(f"{data_dict['任务号']}   |   ")
-        p.add_run("合同号：").bold = True
-        p.add_run(f"{data_dict['合同号']}\n")
-
-        p.add_run("• 认证标准：").bold = True
-        p.add_run(f"{data_dict['认证标准']}   |   ")
-        p.add_run("审核类型：").bold = True
-        p.add_run(f"{data_dict['审核类型']}\n")
-
-        p.add_run("• 审核团队：").bold = True
-        p.add_run(f"{data_dict['审核团队']}   |   ")
-        p.add_run("评定人员：").bold = True
-        p.add_run(f"{data_dict['评定人员']}\n")
-
-        p.add_run("• 认证结论：").bold = True
-        p.add_run(f"{data_dict['认证结论']}   |   结论日期：{data_dict['结论日期']}\n")
-
-        p.add_run("• 审核地址：").bold = True
-        p.add_run(f"{data_dict['审核地址']}\n")
-
-        p.add_run("• 认证范围：").bold = True
-        p.add_run(f"{data_dict['认证范围']}")
-
-    target_stream = io.BytesIO()
-    doc.save(target_stream)
-    target_stream.seek(0)
-    return target_stream.getvalue()
-
+# ===== Batch generation =====
 
 def generate_word_zip_batch(df, template_bytes=None):
-    """【生成多个报告模块】：为每家企业单独填充 Word 模版，打包为 ZIP 格式"""
     zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
         for idx, row in df.iterrows():
             data_dict = row.to_dict()
             doc_bytes = fill_word_template_single(data_dict, template_bytes)
-
-            raw_company = str(data_dict.get("公司中文名", f"企业_{idx + 1}"))
-            company_name = re.sub(r'[\\/*?:"<>|]', "_", raw_company)
-            task_no = re.sub(
-                r'[\\/*?:"<>|]', "_", str(data_dict.get("任务号", ""))
-            )
-
-            filename = (
-                f"{company_name}_{task_no}_评定报告.docx"
-                if task_no
-                else f"{company_name}_评定报告.docx"
-            )
+            raw_company = str(data_dict.get('公司中文名', f'企业_{idx+1}'))
+            company_name = re.sub(r'[\\/*?:\"<>|]', '_', raw_company)
+            task_no = re.sub(r'[\\/*?:\"<>|]', '_', str(data_dict.get('任务号', '')))
+            filename = f'{company_name}_{task_no}_评定报告.docx' if task_no else f'{company_name}_评定报告.docx'
             zf.writestr(filename, doc_bytes)
-
     zip_buffer.seek(0)
     return zip_buffer.getvalue()
 
-
-def generate_word_bytes_batch(df):
-    """生成单文档全量汇总 Word 报告"""
-    doc = Document()
-    title = doc.add_heading("认证评定记录全量汇总报告", level=1)
-    title.runs[0].font.color.rgb = RGBColor(0x1F, 0x49, 0x7D)
-
-    for idx, row in df.iterrows():
-        p_head = doc.add_paragraph()
-        r_head = p_head.add_run(f"【{idx + 1}】 {row['公司中文名']} ")
-        r_head.bold = True
-        r_head.font.size = Pt(12)
-
-        if row["公司英文名"]:
-            r_en = p_head.add_run(f"({row['公司英文名']})")
-            r_en.italic = True
-
-        p_body = doc.add_paragraph()
-        p_body.paragraph_format.left_indent = Inches(0.2)
-        p_body.add_run("• 任务号：").bold = True
-        p_body.add_run(f"{row['任务号']}   |   合同号：{row['合同号']}\n")
-        p_body.add_run("• 认证标准：").bold = True
-        p_body.add_run(f"{row['认证标准']}   |   审核类型：{row['审核类型']}\n")
-        p_body.add_run("• 审核团队：").bold = True
-        p_body.add_run(f"{row['审核团队']}   |   评定人员：{row['评定人员']}\n")
-        p_body.add_run("• 认证结论：").bold = True
-        p_body.add_run(f"{row['认证结论']}   |   结论日期：{row['结论日期']}\n")
-        p_body.add_run("• 审核地址：").bold = True
-        p_body.add_run(f"{row['审核地址']}\n")
-        p_body.add_run("• 认证范围：").bold = True
-        p_body.add_run(f"{row['认证范围']}")
-
-        doc.add_paragraph("-" * 65)
-
-    target_stream = io.BytesIO()
-    doc.save(target_stream)
-    target_stream.seek(0)
-    return target_stream.getvalue()
-
-
 def generate_excel_bytes(df):
-    target_stream = io.BytesIO()
-    with pd.ExcelWriter(target_stream, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="认证评定解析全量表")
-    target_stream.seek(0)
-    return target_stream.getvalue()
+    target = io.BytesIO()
+    with pd.ExcelWriter(target, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='认证评定解析全量表')
+    target.seek(0)
+    return target.getvalue()
 
 
-# ==========================================
-# 3. Streamlit 主界面 (仅包含指定的两个模式)
-# ==========================================
-st.title("🛡️ 认证评定自动化解析与模版生成系统")
+# ===== Streamlit UI =====
+st.set_page_config(page_title='认证评定自动化解析与模版生成系统', layout='wide')
 
-# 顶部文件上传区
-up_col1, up_col2 = st.columns(2)
-with up_col1:
-    excel_file = st.file_uploader(
-        "1. 上传认证评定 Excel 数据文件 (.xlsx / .xls)",
-        type=["xlsx", "xls"],
-    )
-with up_col2:
-    template_file = st.file_uploader(
-        "2. (可选) 上传自定义 Word 模板 (.docx)", type=["docx"]
-    )
-    with st.expander("💡 提示：自定义模板占位符写法"):
-        st.markdown(
-            """
-        在 Word 模板中可直接输入以下标签，系统自动替换对应文本：
-        - `{{公司中文名}}` 、 `{{公司英文名}}`
-        - `{{任务号}}` 、 `{{合同号}}`
-        - `{{审核团队}}` 、 `{{评定人员}}`
-        - `{{认证标准}}` 、 `{{审核类型}}`
-        - `{{审核地址}}` 、 `{{认证范围}}`
-        - `{{认证结论}}` 、 `{{结论日期}}`
-        """
-        )
+st.title('认证评定自动化解析与模版生成系统')
 
-template_bytes = template_file.getvalue() if template_file else None
+uploaded_file = st.file_uploader('上传 Excel 数据文件', type=['xlsx'])
+template_file = st.file_uploader('上传 Word 模版 (docx)', type=['docx'])
 
-# 界面仅保留仅有的 2 个功能模式
-tab_single, tab_batch = st.tabs(
-    [
-        "🎯 单条记录生成 (Single Generate)",
-        "📦 生成多个报告 (Batch Generate)",
-    ]
-)
-
-if excel_file is not None:
+if uploaded_file and template_file:
     try:
-        with st.spinner("正在解析与处理数据..."):
-            df_master, df_anomalies = parse_and_fix_excel(excel_file)
-
-        # 侧边栏过滤
-        st.sidebar.header("🔍 数据筛选与检索")
-        search_kw = st.sidebar.text_input("搜索企业名称或任务号:")
-        selected_decision = st.sidebar.multiselect(
-            "按认证结论筛选:",
-            options=df_master["认证结论"].unique().tolist(),
-            default=[],
-        )
-        selected_standard = st.sidebar.multiselect(
-            "按认证标准筛选:",
-            options=df_master["认证标准"].unique().tolist(),
-            default=[],
-        )
-
-        filtered_df = df_master.copy()
-        if search_kw:
-            filtered_df = filtered_df[
-                filtered_df["公司中文名"].str.contains(search_kw, na=False)
-                | filtered_df["任务号"].str.contains(search_kw, na=False)
-                | filtered_df["公司英文名"].str.contains(search_kw, na=False)
-            ]
-        if selected_decision:
-            filtered_df = filtered_df[
-                filtered_df["认证结论"].isin(selected_decision)
-            ]
-        if selected_standard:
-            filtered_df = filtered_df[
-                filtered_df["认证标准"].isin(selected_standard)
-            ]
-
-        # ----------------------------------------------------
-        # 模式 1: 单条记录生成 (Single Generate) - 保持原样不动
-        # ----------------------------------------------------
-        with tab_single:
-            st.subheader("🎯 选定单家企业生成/下载独立文档")
-            company_list = filtered_df["公司中文名"].tolist()
-
-            if company_list:
-                selected_company = st.selectbox(
-                    "请选择目标企业:", options=company_list
-                )
-                single_row = filtered_df[
-                    filtered_df["公司中文名"] == selected_company
-                ].iloc[0]
-                single_dict = single_row.to_dict()
-
-                st.info(
-                    f"**已选中记录**：{single_dict['公司中文名']} (任务号: {single_dict['任务号']})"
-                )
-
-                card_col1, card_col2 = st.columns(2)
-                with card_col1:
-                    st.write(f"**公司英文名**: {single_dict['公司英文名']}")
-                    st.write(f"**合同号**: {single_dict['合同号']}")
-                    st.write(f"**审核团队**: {single_dict['审核团队']}")
-                    st.write(f"**评定人员**: {single_dict['评定人员']}")
-                    st.write(f"**认证标准**: {single_dict['认证标准']}")
-                with card_col2:
-                    st.write(f"**审核类型**: {single_dict['审核类型']}")
-                    st.write(f"**认证结论**: {single_dict['认证结论']}")
-                    st.write(f"**结论日期**: {single_dict['结论日期']}")
-                    st.write(f"**审核地址**: {single_dict['审核地址']}")
-                    st.write(f"**认证范围**: {single_dict['认证范围']}")
-
-                st.markdown("---")
-                s_btn1, s_btn2 = st.columns(2)
-
-                single_word_bytes = fill_word_template_single(
-                    single_dict, template_bytes
-                )
-                template_status_label = (
-                    "已套用自定义 Word 模版"
-                    if template_bytes
-                    else "已套用系统内置规范样式"
-                )
-
-                s_btn1.download_button(
-                    label=f"📄 下载该单条记录 Word 报告 ({template_status_label})",
-                    data=single_word_bytes,
-                    file_name=f"{single_dict['公司中文名']}_评定记录.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                )
-
-                single_df = pd.DataFrame([single_dict])
-                single_excel_bytes = generate_excel_bytes(single_df)
-                s_btn2.download_button(
-                    label="📊 下载该单条记录 Excel 表格",
-                    data=single_excel_bytes,
-                    file_name=f"{single_dict['公司中文名']}_评定记录.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-            else:
-                st.warning("当前筛选条件下未找到任何记录。")
-
-        # ----------------------------------------------------
-        # 模式 2: 生成多个报告 (Batch Generate)
-        # ----------------------------------------------------
-        with tab_batch:
-            st.subheader("📦 批量生成多个企业独立报告")
-            st.write(f"当前选中待处理的数据记录数: **{len(filtered_df)}** 条")
-
-            tpl_batch_info = (
-                "使用【自定义 Word 模板】"
-                if template_bytes
-                else "使用【内置标准格式】"
-            )
-
-            b_btn1, b_btn2 = st.columns(2)
-
-            batch_zip_data = generate_word_zip_batch(
-                filtered_df, template_bytes
-            )
-            b_btn1.download_button(
-                label=f"📦 批量生成并下载多个独立 Word 报告包 (.zip) — {tpl_batch_info}",
-                data=batch_zip_data,
-                file_name="批量认证评定报告_Word独立文档包.zip",
-                mime="application/zip",
-            )
-
-            batch_excel_data = generate_excel_bytes(filtered_df)
-            b_btn2.download_button(
-                label="📥 导出批量 Excel 汇总表 (.xlsx)",
-                data=batch_excel_data,
-                file_name="认证评定记录_批量汇总.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-
-            st.markdown("---")
-            st.write("📌 **备用选项：**")
-            batch_word_summary_data = generate_word_bytes_batch(filtered_df)
-            st.download_button(
-                label="📄 下载单文档全量汇总 Word 报告 (.docx)",
-                data=batch_word_summary_data,
-                file_name="认证评定全量汇总长文档.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )
-
+        with st.spinner('正在解析 Excel 数据...'):
+            df, anomaly_df = parse_and_fix_excel(uploaded_file)
+        template_bytes = template_file.read()
+        st.success(f'解析完成！共 {len(df)} 条有效记录，{len(anomaly_df)} 条异常记录')
+        
+        if not df.empty:
+            tab_single, tab_batch = st.tabs(['单条记录生成', '批量生成'])
+            
+            with tab_single:
+                st.subheader('单条记录生成')
+                selected = st.selectbox('选择记录', df['任务号'].tolist())
+                if selected:
+                    sel_row = df[df['任务号'] == selected].iloc[0]
+                    st.json(sel_row.to_dict())
+                    word_bytes = fill_word_template_single(sel_row.to_dict(), template_bytes)
+                    st.download_button('下载 Word 报告', data=word_bytes, file_name=f'{sel_row["公司中文名"]}_评定报告.docx', mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+            
+            with tab_batch:
+                st.subheader('批量生成')
+                st.write(f'当前选中待处理记录: **{len(df)}** 条')
+                zip_data = generate_word_zip_batch(df, template_bytes)
+                st.download_button('批量下载 Word 报告 (.zip)', data=zip_data, file_name='批量认证评定报告.zip', mime='application/zip')
+                excel_data = generate_excel_bytes(df)
+                st.download_button('导出 Excel 汇总', data=excel_data, file_name='认证评定记录_汇总.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        
+        if not anomaly_df.empty:
+            st.warning(f'发现 {len(anomaly_df)} 条数据异常，请查看:')
+            st.dataframe(anomaly_df)
+            
     except Exception as e:
-        st.error(f"处理文件时发生错误: {str(e)}")
+        st.error(f'处理文件时发生错误: {str(e)}')
+elif uploaded_file:
+    st.info('请同时上传 Word 模版以生成报告')
 else:
-    with tab_single:
-        st.info("👈 请在左上方上传 Excel 数据文件以开始使用【单条记录生成】。")
-    with tab_batch:
-        st.info("👈 请在左上方上传 Excel 数据文件以开始使用【生成多个报告】。")
+    st.info('请上传 Excel 数据文件和 Word 模版')
+
+st.caption('Cert Report Generator v2.9')
